@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import time
 import base64
 import logging
 from threading import Thread
@@ -29,7 +30,8 @@ log = logging.getLogger("beauty-nano-bot")
 load_dotenv()
 BOT_TOKEN      = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-PORT           = int(os.getenv("PORT", "8080"))   # Render подставляет свой
+PORT           = int(os.getenv("PORT", "8080"))   # Render подставит свой
+RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "10"))
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в .env/Environment")
@@ -40,8 +42,9 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# ---------- РЕЖИМЫ / КЛАВЫ ----------
+# ---------- РЕЖИМЫ / КЛАВЫ / RATE-LIMIT ----------
 MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо+Волосы"}
+LAST_ANALYSIS_AT: dict[int, float] = {}  # {user_id: timestamp}
 
 def get_mode(user_data: dict) -> str:
     return user_data.get("mode", "both")
@@ -66,6 +69,8 @@ def action_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔄 Новый анализ", callback_data="home")],
             [InlineKeyboardButton("⚙️ Режим", callback_data="mode_menu")],
+            [InlineKeyboardButton("👍 Полезно", callback_data="fb:up"),
+             InlineKeyboardButton("👎 Не очень", callback_data="fb:down")],
         ]
     )
 
@@ -215,17 +220,31 @@ async def on_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def on_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
-    await q.answer()
-    data = q.data or ""
+    data = (q.data or "").strip()
+
+    # Фидбек
+    if data in ("fb:up", "fb:down"):
+        await q.answer("Спасибо за отзыв!" if data == "fb:up" else "Принято 👍", show_alert=False)
+        log.info("Feedback from %s: %s", update.effective_user.id, data)
+        return
+
+    # Домой
     if data == "home":
+        await q.answer()
         return await send_home(update.effective_chat, context.user_data)
+
+    # Меню режимов
     if data == "mode_menu":
+        await q.answer()
         current = get_mode(context.user_data)
         return await q.edit_message_text(
             f"Текущий режим: {MODES[current]}\nВыбери другой:",
             reply_markup=mode_keyboard(current)
         )
+
+    # Смена режима
     if data.startswith("mode:"):
+        await q.answer("Режим обновлён")
         mode = data.split(":", 1)[1]
         set_mode(context.user_data, mode)
         return await q.edit_message_text(
@@ -234,15 +253,40 @@ async def on_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # rate limit
+    user_id = update.effective_user.id
+    now = time.time()
+    last = LAST_ANALYSIS_AT.get(user_id, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        wait = int(max(1, RATE_LIMIT_SECONDS - (now - last)))
+        return await update.message.reply_text(
+            f"Подожди {wait} сек. перед следующим анализом ⏳",
+            reply_markup=mode_keyboard(get_mode(context.user_data))
+        )
+    LAST_ANALYSIS_AT[user_id] = now
+
     file = await update.message.photo[-1].get_file()
     buf = io.BytesIO()
     await file.download_to_memory(out=buf)
     await _process_image_bytes(update.effective_chat, buf.getvalue(), get_mode(context.user_data), context.user_data)
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # rate limit
+    user_id = update.effective_user.id
+    now = time.time()
+    last = LAST_ANALYSIS_AT.get(user_id, 0)
+    if now - last < RATE_LIMIT_SECONDS:
+        wait = int(max(1, RATE_LIMIT_SECONDS - (now - last)))
+        return await update.message.reply_text(
+            f"Подожди {wait} сек. перед следующим анализом ⏳",
+            reply_markup=mode_keyboard(get_mode(context.user_data))
+        )
+
     doc = update.message.document
     if not (doc and doc.mime_type and doc.mime_type.startswith("image/")):
         return await update.message.reply_text("Пришли, пожалуйста, фото.")
+
+    LAST_ANALYSIS_AT[user_id] = now
     file = await doc.get_file()
     buf = io.BytesIO()
     await file.download_to_memory(out=buf)
@@ -278,7 +322,7 @@ def main() -> None:
     tg_app.add_handler(CommandHandler("mode", on_mode))
     tg_app.add_handler(CommandHandler("help", on_help))
     tg_app.add_handler(CommandHandler("privacy", on_privacy))
-    tg_app.add_handler(CallbackQueryHandler(on_mode_callback, pattern=r"^(home|mode_menu|mode:)"))
+    tg_app.add_handler(CallbackQueryHandler(on_mode_callback))  # без pattern: принимаем home/mode/fb
     tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     tg_app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
