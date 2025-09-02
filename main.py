@@ -247,26 +247,7 @@ def main() -> None:
     tg_app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     tg_app.add_error_handler(on_error)
 
-    if WEBHOOK_URL:
-        # ⚠️ В webhook-режиме НЕ запускаем Flask (иначе конфликт порта).
-        # Регистрируем healthz во встроенном aiohttp-сервере PTB:
-        try:
-            from aiohttp import web as aiohttp_web
-            async def healthz(_):
-                return aiohttp_web.Response(text="ok")
-            tg_app.web_app.add_routes([aiohttp_web.get("/healthz", healthz)])
-            log.info("Registered GET /healthz for Render health check")
-        except Exception as e:
-            log.warning("Cannot register /healthz route: %s", e)
-
-        log.info("Starting webhook: %s on port %s", WEBHOOK_URL, PORT)
-        tg_app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
-
-    else:
-        # Polling-режим (локально/временный): тут можно поднимать Flask /healthz
-        start_flask_healthz(PORT)  # оставляем только для polling
-        log.warning("WEBHOOK_URL not set -> polling mode")
-        tg_app.run_polling()
-
-if __name__ == "__main__":
-    main()
+    # Всегда поднимаем healthz и ВСЕГДА запускаем polling
+    start_flask_healthz(PORT)
+    logging.warning("Force POLLING mode (WEBHOOK_URL игнорируется)")
+    tg_app.run_polling()
