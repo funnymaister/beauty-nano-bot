@@ -69,9 +69,9 @@ def check_usage(user_id: int) -> bool:
 def get_usage_text(user_id: int) -> str:
     u = USAGE.get(user_id, {"count": 0, "month": datetime.utcnow().month, "premium": False})
     if u.get("premium"):
-        return "🌟 У тебя активен Премиум (безлимит анализов)"
+        return "🌟 У тебя активен Премиум (безлимит анализов)."
     left = max(0, FREE_LIMIT - u["count"])
-    return f"Осталось бесплатных анализов в этом месяце: {left} из {FREE_LIMIT}"
+    return f"Осталось бесплатных анализов в этом месяце: {left} из {FREE_LIMIT}."
 
 # ---------- КЛАВЫ ----------
 def action_keyboard(premium: bool = False) -> InlineKeyboardMarkup:
@@ -80,7 +80,8 @@ def action_keyboard(premium: bool = False) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⚙️ Режим", callback_data="mode_menu")],
         [InlineKeyboardButton("🧑‍💼 Профиль", callback_data="profile")],
         [InlineKeyboardButton("👍 Полезно", callback_data="fb:up"),
-         InlineKeyboardButton("👎 Не очень", callback_data="fb:down")]
+         InlineKeyboardButton("👎 Не очень", callback_data="fb:down")],
+        [InlineKeyboardButton("ℹ️ Лимиты", callback_data="limits")]
     ]
     if not premium:
         buttons.append([InlineKeyboardButton("🌟 Премиум", callback_data="premium")])
@@ -95,7 +96,8 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
             "🚫 Лимит бесплатных анализов исчерпан.\n\n"
             "Оформи 🌟 Премиум (безлимит):",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🌟 Купить Премиум", callback_data="premium")]
+                [InlineKeyboardButton("🌟 Купить Премиум", callback_data="premium")],
+                [InlineKeyboardButton("ℹ️ Лимиты", callback_data="limits")]
             ])
         )
 
@@ -141,7 +143,8 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
 
 # ---------- КОМАНДЫ ----------
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    u = USAGE.get(update.effective_user.id, {"premium": False})
+    user_id = update.effective_user.id
+    u = USAGE.get(user_id, {"premium": False})
     await update.message.reply_text(
         "Привет! Я Beauty Nano Bot 💇‍♀️🤖\n"
         "Я анализирую фото лица и волос и даю советы.\n\n"
@@ -149,14 +152,18 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Хочешь безлимит? Жми 🌟 Премиум.",
         reply_markup=action_keyboard(u.get("premium", False))
     )
-    await update.message.reply_text(get_usage_text(update.effective_user.id))
+    await update.message.reply_text(get_usage_text(user_id))
 
 # ---------- CALLBACK ----------
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
     user_id = update.effective_user.id
-    u = USAGE.setdefault(user_id, {"premium": False})
+    u = USAGE.setdefault(user_id, {"count": 0, "month": datetime.utcnow().month, "premium": False})
+
+    if data == "limits":
+        await q.answer()
+        return await q.message.reply_text(get_usage_text(user_id))
 
     if data == "premium":
         await q.answer()
@@ -168,9 +175,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Цена: 299 ₽ / месяц\n",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💳 Купить", callback_data="buy")]
+                [InlineKeyboardButton("💳 Купить", callback_data="buy")],
+                [InlineKeyboardButton("ℹ️ Лимиты", callback_data="limits")]
             ])
         )
+
     if data == "buy":
         u["premium"] = True
         await q.answer()
@@ -178,12 +187,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Премиум активирован! Теперь у тебя безлимит.",
             reply_markup=action_keyboard(True)
         )
+
     if data == "renew":
         u["premium"] = True
         await q.answer("Премиум продлён")
         return await q.message.edit_text(
             "Премиум продлён ✅", reply_markup=action_keyboard(True)
         )
+
     if data in ("fb:up", "fb:down"):
         await q.answer("Спасибо!" if data == "fb:up" else "Принято 👍")
 
