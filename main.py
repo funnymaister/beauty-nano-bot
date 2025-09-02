@@ -2,9 +2,14 @@ import os
 import io
 import base64
 import logging
+from threading import Thread
+
 from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
+
+# Flask — только для health-check, когда работаем в polling
+from flask import Flask
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -21,10 +26,10 @@ log = logging.getLogger("beauty-nano-bot")
 
 # ---------- КОНФИГ ----------
 load_dotenv()
-BOT_TOKEN    = os.getenv("BOT_TOKEN")
+BOT_TOKEN      = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-WEBHOOK_URL  = os.getenv("WEBHOOK_URL")
-PORT         = int(os.getenv("PORT", "8080"))
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")              # напр.: https://<app>.onrender.com/webhook
+PORT           = int(os.getenv("PORT", "8080"))
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в .env/Environment")
@@ -57,7 +62,6 @@ def mode_keyboard(active: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(kb)
 
 def action_keyboard() -> InlineKeyboardMarkup:
-    """Кнопки под результатом: новый анализ или сменить режим."""
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🔄 Новый анализ", callback_data="home")],
@@ -72,8 +76,7 @@ def _hello_text() -> str:
     )
 
 async def send_home(chat, user_data):
-    """Экран 'в начало': привет + клавиатура режимов."""
-    set_mode(user_data, get_mode(user_data))  # ensure default
+    set_mode(user_data, get_mode(user_data))
     current = get_mode(user_data)
     await chat.send_message(_hello_text(), reply_markup=mode_keyboard(current))
 
@@ -141,13 +144,8 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
         text = (getattr(response, "text", "") or "").strip()
         if not text:
             text = "Ответ пустой. Возможно, сработала модерация или сбой."
-
-        # Обрезка на всякий случай
-        max_len = 1800
-        if len(text) > max_len:
-            text = text[:max_len] + "\n\n<i>Сокращено. Напиши /help для подсказок.</i>"
-
-        # Отправляем результат с кнопками действий
+        if len(text) > 1800:
+            text = text[:1800] + "\n\n<i>Сокращено. Напиши /help для подсказок.</i>"
         await chat.send_message(text, parse_mode="HTML", reply_markup=action_keyboard())
     except Exception as e:
         log.exception("Gemini error")
@@ -186,20 +184,17 @@ async def on_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await q.answer()
     data = q.data or ""
     if data == "home":
-        await send_home(update.effective_chat, context.user_data)
-        return
+        return await send_home(update.effective_chat, context.user_data)
     if data == "mode_menu":
-        # открыть меню выбора режима
         current = get_mode(context.user_data)
-        await q.edit_message_text(
+        return await q.edit_message_text(
             f"Текущий режим: {MODES[current]}\nВыбери другой:",
             reply_markup=mode_keyboard(current)
         )
-        return
     if data.startswith("mode:"):
         mode = data.split(":", 1)[1]
         set_mode(context.user_data, mode)
-        await q.edit_message_text(
+        return await q.edit_message_text(
             f"Режим установлен: {MODES[mode]}\nПришли фото.",
             reply_markup=mode_keyboard(mode)
         )
@@ -224,36 +219,63 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ---------- АВТОПРИВЕТ (нажатие Start) ----------
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new = update.my_chat_member.new_chat_member
-    if new.status == "member":  # пользователь только что запустил бота
+    if new.status == "member":
         await send_home(update.effective_chat, context.user_data)
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Dispatcher error: %s", context.error)
 
+# ---------- HEALTH (Flask) ----------
+def start_flask_health(port: int):
+    """Поднимаем /health на нужном порту в отдельном потоке (нужно для Render в режиме polling)."""
+    app = Flask(__name__)
+
+    @app.get("/health")
+    def health():
+        return "ok", 200
+
+    # Без reloader и debug, чтобы не плодить процессы
+    th = Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False))
+    th.daemon = True
+    th.start()
+    log.info("Flask health server running on port %s", port)
+
 # ---------- MAIN ----------
 def main() -> None:
-    app = Application.builder().token(BOT_TOKEN).build()
+    tg_app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("mode", on_mode))
-    app.add_handler(CommandHandler("help", on_help))
-    app.add_handler(CommandHandler("privacy", on_privacy))
+    tg_app.add_handler(CommandHandler("mode", on_mode))
+    tg_app.add_handler(CommandHandler("help", on_help))
+    tg_app.add_handler(CommandHandler("privacy", on_privacy))
 
-    app.add_handler(CallbackQueryHandler(on_mode_callback, pattern=r"^(home|mode_menu|mode:)"))
+    tg_app.add_handler(CallbackQueryHandler(on_mode_callback, pattern=r"^(home|mode_menu|mode:)"))
 
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
-    app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
+    tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    tg_app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
+    tg_app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
-    # Автопривет при первом запуске бота (кнопка Start)
-    app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-
-    app.add_error_handler(on_error)
+    tg_app.add_error_handler(on_error)
 
     if WEBHOOK_URL:
-        log.info("Starting webhook: %s on port %s", WEBHOOK_URL, PORT)
-        app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
+        # ДОБАВЛЯЕМ /healthz в встроенный aiohttp веб-сервер PTB
+        try:
+            from aiohttp import web as aiohttp_web  # aiohttp ставится вместе с PTB[webhooks]
+            async def healthz(_):
+                return aiohttp_web.Response(text="ok")
+            # tg_app.web_app доступен ПЕРЕД run_webhook
+            tg_app.web_app.add_routes([aiohttp_web.get("/healthz", healthz)])
+            logging.info("Registered GET /healthz for Render health check")
+        except Exception as e:
+            logging.warning("Cannot register /healthz route: %s", e)
+
+        logging.info("Starting webhook: %s on port %s", WEBHOOK_URL, PORT)
+        # Если хочешь явно указать путь — добавь url_path="/webhook"
+        tg_app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
     else:
-        log.info("Starting long-polling (no WEBHOOK_URL set)")
-        app.run_polling()
+        # polling + (опционально) Flask /health уже подключён выше
+        logging.warning("WEBHOOK_URL not set -> polling mode")
+        start_flask_health(PORT)  # можно убрать, если локально не нужен
+        tg_app.run_polling()
 
 if __name__ == "__main__":
     main()
