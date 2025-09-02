@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import base64
 import logging
 from threading import Thread
@@ -11,6 +12,7 @@ import google.generativeai as genai
 from flask import Flask  # для /healthz
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     ContextTypes, CallbackQueryHandler, ChatMemberHandler, filters
@@ -144,7 +146,28 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
             text = "Ответ пустой. Возможно, сработала модерация или сбой."
         if len(text) > 1800:
             text = text[:1800] + "\n\n<i>Сокращено. Напиши /help для подсказок.</i>"
-        await chat.send_message(text, parse_mode="HTML", reply_markup=action_keyboard())
+
+        # --- Надёжная отправка: сначала HTML, при ошибке — plain text ---
+        try:
+            await chat.send_message(
+                text,
+                parse_mode="HTML",
+                reply_markup=action_keyboard(),
+                disable_web_page_preview=True,
+            )
+        except BadRequest as e:
+            log.warning("HTML parse failed (%s). Fallback to plain text.", e)
+            safe = re.sub(r"(?i)<\s*br\s*/?>", "\n", text)  # <br> -> \n
+            safe = re.sub(r"(?i)</?(p|div|ul|ol|li|h[1-6])[^>]*>", "\n", safe)
+            safe = re.sub(r"<[^>]+>", "", safe)             # снять прочие теги
+            safe = re.sub(r"\n{3,}", "\n\n", safe).strip()
+            if not safe:
+                safe = "Не удалось отформатировать ответ.\n\n" + text
+            await chat.send_message(
+                safe,
+                reply_markup=action_keyboard(),
+                disable_web_page_preview=True,
+            )
     except Exception as e:
         log.exception("Gemini error")
         await chat.send_message(f"Ошибка анализа изображения: {e}")
