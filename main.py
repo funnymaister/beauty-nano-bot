@@ -251,3 +251,5 @@ def main() -> None:
     start_flask_healthz(PORT)
     logging.warning("Force POLLING mode (WEBHOOK_URL игнорируется)")
     tg_app.run_polling()
+if __name__ == "__main__":
+    main()
