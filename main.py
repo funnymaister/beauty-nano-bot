@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
 
-from flask import Flask  # только для healthz
+from flask import Flask  # для /healthz
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -27,8 +27,7 @@ log = logging.getLogger("beauty-nano-bot")
 load_dotenv()
 BOT_TOKEN      = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")              # напр.: https://<app>.onrender.com/webhook
-PORT           = int(os.getenv("PORT", "8080"))
+PORT           = int(os.getenv("PORT", "8080"))   # Render подставляет свой
 
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в .env/Environment")
@@ -150,7 +149,21 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
         log.exception("Gemini error")
         await chat.send_message(f"Ошибка анализа изображения: {e}")
 
-# ---------- КОМАНДЫ / CALLBACK-и ----------
+# ---------- КОМАНДЫ / CALLBACK-и / FALLBACK ТЕКСТА ----------
+async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["welcomed"] = True
+    await send_home(update.effective_chat, context.user_data)
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("welcomed"):
+        context.user_data["welcomed"] = True
+        return await send_home(update.effective_chat, context.user_data)
+    current = get_mode(context.user_data)
+    await update.message.reply_text(
+        "Я жду фото 🙂\nМожно сменить режим: /mode",
+        reply_markup=mode_keyboard(current)
+    )
+
 async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current = get_mode(context.user_data)
     await update.message.reply_text(
@@ -214,6 +227,7 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.my_chat_member.new_chat_member.status == "member":
+        context.user_data["welcomed"] = True
         await send_home(update.effective_chat, context.user_data)
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -221,8 +235,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ---------- HEALTHZ (Flask) ----------
 def start_flask_healthz(port: int):
-    """Всегда поднимаем /healthz на том же порту (и в webhook, и в polling),
-    чтобы Render Health Check получал 200 OK."""
+    """/healthz — для Render Health Check (HTTP 200)."""
     app = Flask(__name__)
 
     @app.get("/healthz")
@@ -234,16 +247,18 @@ def start_flask_healthz(port: int):
     th.start()
     log.info("Flask /healthz running on port %s", port)
 
-# ---------- MAIN ----------
+# ---------- MAIN (форс-polling) ----------
 def main() -> None:
     tg_app = Application.builder().token(BOT_TOKEN).build()
 
+    tg_app.add_handler(CommandHandler("start", on_start))
     tg_app.add_handler(CommandHandler("mode", on_mode))
     tg_app.add_handler(CommandHandler("help", on_help))
     tg_app.add_handler(CommandHandler("privacy", on_privacy))
     tg_app.add_handler(CallbackQueryHandler(on_mode_callback, pattern=r"^(home|mode_menu|mode:)"))
     tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     tg_app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     tg_app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     tg_app.add_error_handler(on_error)
 
@@ -251,5 +266,6 @@ def main() -> None:
     start_flask_healthz(PORT)
     logging.warning("Force POLLING mode (WEBHOOK_URL игнорируется)")
     tg_app.run_polling()
+
 if __name__ == "__main__":
     main()
