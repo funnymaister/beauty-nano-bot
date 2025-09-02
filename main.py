@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
 
-# Flask — только для health-check, когда работаем в polling
-from flask import Flask
+from flask import Flask  # только для healthz
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -40,7 +39,7 @@ if not GEMINI_API_KEY:
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# ---------- РЕЖИМЫ ----------
+# ---------- РЕЖИМЫ / КЛАВЫ ----------
 MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо+Волосы"}
 
 def get_mode(user_data: dict) -> str:
@@ -80,16 +79,16 @@ async def send_home(chat, user_data):
     current = get_mode(user_data)
     await chat.send_message(_hello_text(), reply_markup=mode_keyboard(current))
 
-# ---------- ПРОМПТ (HTML-ответ) ----------
+# ---------- ПРОМПТ (HTML) ----------
 def build_prompt(mode: str) -> str:
     common = (
         "Отвечай на РУССКОМ. Ты — бережный бьюти-консультант. Дай НЕМЕДИЦИНСКИЕ советы по уходу, "
-        "без диагнозов и лечения. Пиши кратко, структурно, пунктами. Обязательно используй эмодзи в заголовках. "
-        "В конце всегда добавляй один общий дисклеймер одной строкой."
+        "без диагнозов и лечения. Пиши кратко, структурно, пунктами. Используй эмодзи в заголовках. "
+        "В конце добавь один общий дисклеймер одной строкой."
     )
     if mode == "face":
         specific = (
-            "Анализируй ТОЛЬКО ЛИЦО. Верни ответ строго по блокам:\n"
+            "Анализируй ТОЛЬКО ЛИЦО. Блоки:\n"
             "⭐ <b>Что видно</b>\n"
             "🧴 <b>Тип кожи</b>\n"
             "🌞 <b>Утро</b>: 1–3 шага\n"
@@ -99,7 +98,7 @@ def build_prompt(mode: str) -> str:
         )
     elif mode == "hair":
         specific = (
-            "Анализируй ТОЛЬКО ВОЛОСЫ. Верни ответ строго по блокам:\n"
+            "Анализируй ТОЛЬКО ВОЛОСЫ. Блоки:\n"
             "⭐ <b>Что видно</b>\n"
             "💇 <b>Тип/состояние</b>\n"
             "🧼 <b>Мытьё и уход</b>: 1–3 шага\n"
@@ -109,7 +108,7 @@ def build_prompt(mode: str) -> str:
         )
     else:
         specific = (
-            "Анализируй ЛИЦО И ВОЛОСЫ. Верни ответ строго по блокам:\n"
+            "Анализируй ЛИЦО И ВОЛОСЫ. Блоки:\n"
             "⭐ <b>Что видно</b>\n"
             "🧴 <b>Кожа</b>\n"
             "💇 <b>Волосы</b>\n"
@@ -121,7 +120,7 @@ def build_prompt(mode: str) -> str:
         )
     return f"{common}\n\nФорматируй ответ в HTML (теги <b>, <i>, переносы строк).\n\n{specific}"
 
-# ---------- ОБРАБОТКА ИЗОБРАЖЕНИЙ ----------
+# ---------- ОБРАБОТКА ФОТО ----------
 async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dict):
     try:
         im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -151,7 +150,7 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
         log.exception("Gemini error")
         await chat.send_message(f"Ошибка анализа изображения: {e}")
 
-# ---------- КОМАНДЫ ----------
+# ---------- КОМАНДЫ / CALLBACK-и ----------
 async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current = get_mode(context.user_data)
     await update.message.reply_text(
@@ -160,25 +159,24 @@ async def on_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def on_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = (
+    await update.message.reply_text(
         "<b>Как пользоваться</b>\n"
         "1) Выбери режим: лицо/волосы/оба (/mode).\n"
         "2) Отправь фото как <i>фото</i>.\n"
         "3) Получи рекомендации.\n\n"
-        "ℹ️ Это не медицинская консультация."
+        "ℹ️ Это не медицинская консультация.",
+        parse_mode="HTML"
     )
-    await update.message.reply_text(msg, parse_mode="HTML")
 
 async def on_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = (
+    await update.message.reply_text(
         "<b>Конфиденциальность</b>\n"
         "• Фото обрабатывается только в памяти.\n"
         "• Не сохраняется и не передаётся.\n"
-        "• Ответ — общий уход, не замена врача."
+        "• Ответ — общий уход, не замена врача.",
+        parse_mode="HTML"
     )
-    await update.message.reply_text(msg, parse_mode="HTML")
 
-# ---------- CALLBACK-и ----------
 async def on_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     await q.answer()
@@ -199,10 +197,8 @@ async def on_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=mode_keyboard(mode)
         )
 
-# ---------- ОБРАБОТЧИКИ СООБЩЕНИЙ ----------
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    photo = update.message.photo[-1]
-    file = await photo.get_file()
+    file = await update.message.photo[-1].get_file()
     buf = io.BytesIO()
     await file.download_to_memory(out=buf)
     await _process_image_bytes(update.effective_chat, buf.getvalue(), get_mode(context.user_data), context.user_data)
@@ -216,29 +212,27 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await file.download_to_memory(out=buf)
     await _process_image_bytes(update.effective_chat, buf.getvalue(), get_mode(context.user_data), context.user_data)
 
-# ---------- АВТОПРИВЕТ (нажатие Start) ----------
 async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new = update.my_chat_member.new_chat_member
-    if new.status == "member":
+    if update.my_chat_member.new_chat_member.status == "member":
         await send_home(update.effective_chat, context.user_data)
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     log.exception("Dispatcher error: %s", context.error)
 
-# ---------- HEALTH (Flask) ----------
-def start_flask_health(port: int):
-    """Поднимаем /health на нужном порту в отдельном потоке (нужно для Render в режиме polling)."""
+# ---------- HEALTHZ (Flask) ----------
+def start_flask_healthz(port: int):
+    """Всегда поднимаем /healthz на том же порту (и в webhook, и в polling),
+    чтобы Render Health Check получал 200 OK."""
     app = Flask(__name__)
 
-    @app.get("/health")
-    def health():
+    @app.get("/healthz")
+    def healthz():
         return "ok", 200
 
-    # Без reloader и debug, чтобы не плодить процессы
     th = Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False))
     th.daemon = True
     th.start()
-    log.info("Flask health server running on port %s", port)
+    log.info("Flask /healthz running on port %s", port)
 
 # ---------- MAIN ----------
 def main() -> None:
@@ -247,34 +241,20 @@ def main() -> None:
     tg_app.add_handler(CommandHandler("mode", on_mode))
     tg_app.add_handler(CommandHandler("help", on_help))
     tg_app.add_handler(CommandHandler("privacy", on_privacy))
-
     tg_app.add_handler(CallbackQueryHandler(on_mode_callback, pattern=r"^(home|mode_menu|mode:)"))
-
     tg_app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     tg_app.add_handler(MessageHandler(filters.Document.IMAGE, on_document))
     tg_app.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-
     tg_app.add_error_handler(on_error)
 
-    if WEBHOOK_URL:
-        # ДОБАВЛЯЕМ /healthz в встроенный aiohttp веб-сервер PTB
-        try:
-            from aiohttp import web as aiohttp_web  # aiohttp ставится вместе с PTB[webhooks]
-            async def healthz(_):
-                return aiohttp_web.Response(text="ok")
-            # tg_app.web_app доступен ПЕРЕД run_webhook
-            tg_app.web_app.add_routes([aiohttp_web.get("/healthz", healthz)])
-            logging.info("Registered GET /healthz for Render health check")
-        except Exception as e:
-            logging.warning("Cannot register /healthz route: %s", e)
+    # Поднимаем /healthz ВСЕГДА (и для webhook, и для polling)
+    start_flask_healthz(PORT)
 
-        logging.info("Starting webhook: %s on port %s", WEBHOOK_URL, PORT)
-        # Если хочешь явно указать путь — добавь url_path="/webhook"
+    if WEBHOOK_URL:
+        log.info("Starting webhook: %s on port %s", WEBHOOK_URL, PORT)
         tg_app.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=WEBHOOK_URL)
     else:
-        # polling + (опционально) Flask /health уже подключён выше
-        logging.warning("WEBHOOK_URL not set -> polling mode")
-        start_flask_health(PORT)  # можно убрать, если локально не нужен
+        log.warning("WEBHOOK_URL not set -> polling mode")
         tg_app.run_polling()
 
 if __name__ == "__main__":
