@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 from PIL import Image
 import google.generativeai as genai
 
+# Google Sheets
+import gspread
+from google.oauth2.service_account import Credentials
+
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest, Forbidden
@@ -37,13 +41,22 @@ RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "10"))
 DEFAULT_FREE_LIMIT = int(os.getenv("FREE_LIMIT", "5"))
 DEFAULT_PRICE_RUB = int(os.getenv("PRICE_RUB", "299"))
 
+# Хранилище файлов (история/индексы)
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+HISTORY_ENABLED = os.getenv("HISTORY_ENABLED", "1") == "1"
+HISTORY_LIMIT = int(os.getenv("HISTORY_LIMIT", "10"))
+
+# Google Sheets
+SHEETS_ENABLED = os.getenv("SHEETS_ENABLED", "1") == "1"
+SPREADSHEET_ID = os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID")
+SERVICE_JSON_B64 = os.getenv("GOOGLE_SHEETS_CREDS")
+
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN")
 if not GEMINI_API_KEY:
     raise RuntimeError("Не задан GEMINI_API_KEY")
 
 # ---------- ФАЙЛЫ ДАННЫХ ----------
-DATA_DIR = "./data"
 os.makedirs(DATA_DIR, exist_ok=True)
 ADMINS_FILE = os.path.join(DATA_DIR, "admins.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
@@ -51,9 +64,9 @@ USAGE_FILE = os.path.join(DATA_DIR, "usage.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 FEEDBACK_FILE = os.path.join(DATA_DIR, "feedback.json")
 
-# --- История (индекс + файлы) ---
-HISTORY_FILE = os.path.join(DATA_DIR, "history.json")   # индекс истории
-HISTORY_DIR  = os.path.join(DATA_DIR, "history")        # каталог с jpg/txt
+# История (индекс + файлы)
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+HISTORY_DIR  = os.path.join(DATA_DIR, "history")
 os.makedirs(HISTORY_DIR, exist_ok=True)
 
 def load_json(path: str, default):
@@ -87,10 +100,7 @@ USERS: set[int] = set(load_json(USERS_FILE, []))
 USAGE: Dict[int, Dict[str, Any]] = {int(k): v for k, v in load_json(USAGE_FILE, {}).items()}
 CONFIG: Dict[str, Any] = load_json(CONFIG_FILE, {"FREE_LIMIT": DEFAULT_FREE_LIMIT, "PRICE_RUB": DEFAULT_PRICE_RUB})
 FEEDBACK: Dict[str, int] = load_json(FEEDBACK_FILE, {"up": 0, "down": 0})
-
-# индекс истории: user_id(str) -> [{ts, mode, img, txt}]
 HISTORY: Dict[str, List[Dict[str, Any]]] = load_json(HISTORY_FILE, {})
-HISTORY_LIMIT = 10
 
 def persist_all():
     save_json(ADMINS_FILE, list(ADMINS))
@@ -103,6 +113,72 @@ def persist_all():
 # ---------- GEMINI ----------
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-1.5-flash")
+
+# ---------- GOOGLE SHEETS ----------
+_gc = None
+_sh = None
+
+def _ensure_ws(title: str, headers: List[str]):
+    try:
+        ws = _sh.worksheet(title)
+        return ws
+    except gspread.WorksheetNotFound:
+        ws = _sh.add_worksheet(title=title, rows="200", cols=str(max(20, len(headers) + 5)))
+        ws.append_row(headers)
+        return ws
+
+def sheets_init():
+    """Подключаемся к Google Sheets, создаём листы."""
+    global _gc, _sh
+    if not SHEETS_ENABLED:
+        log.info("Sheets disabled by env")
+        return
+    if not SPREADSHEET_ID or not SERVICE_JSON_B64:
+        log.warning("Sheets env missing: GOOGLE_SHEETS_SPREADSHEET_ID or GOOGLE_SHEETS_CREDS")
+        return
+    try:
+        creds_info = json.loads(base64.b64decode(SERVICE_JSON_B64))
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        credentials = Credentials.from_service_account_info(creds_info, scopes=scopes)
+        _gc = gspread.authorize(credentials)
+        _sh = _gc.open_by_key(SPREADSHEET_ID)
+        _ensure_ws("users",    ["ts", "user_id", "username", "is_admin", "premium"])
+        _ensure_ws("analyses", ["ts", "user_id", "username", "mode", "premium", "free_used", "text"])
+        _ensure_ws("feedback", ["ts", "user_id", "value"])
+        log.info("Sheets connected")
+    except Exception as e:
+        log.exception("Sheets init failed: %s", e)
+
+def sheets_log_user(user_id: int, username: str | None):
+    if not _sh: return
+    try:
+        ws = _sh.worksheet("users")
+        ws.append_row(
+            [int(time.time()), user_id, username or "", bool(user_id in ADMINS), bool(usage_entry(user_id).get("premium"))],
+            value_input_option="USER_ENTERED"
+        )
+    except Exception as e:
+        log.warning("sheets_log_user failed: %s", e)
+
+def sheets_log_analysis(user_id: int, username: str | None, mode: str, text: str):
+    if not _sh: return
+    try:
+        u = usage_entry(user_id)
+        ws = _sh.worksheet("analyses")
+        ws.append_row(
+            [int(time.time()), user_id, username or "", mode, bool(u.get("premium")), int(u.get("count", 0)), text[:10000]],
+            value_input_option="USER_ENTERED"
+        )
+    except Exception as e:
+        log.warning("sheets_log_analysis failed: %s", e)
+
+def sheets_log_feedback(user_id: int, value: str):
+    if not _sh: return
+    try:
+        ws = _sh.worksheet("feedback")
+        ws.append_row([int(time.time()), user_id, value], value_input_option="USER_ENTERED")
+    except Exception as e:
+        log.warning("sheets_log_feedback failed: %s", e)
 
 # ---------- ПАМЯТЬ ----------
 LAST_ANALYSIS_AT: Dict[int, float] = {}
@@ -175,9 +251,6 @@ async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ок, отменил настройку профиля. /profile — начать заново.")
     return ConversationHandler.END
 
-async def myprofile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Текущий профиль:\n\n" + profile_to_text(get_profile(context.user_data)))
-
 # ---------- ХЕЛПЕРЫ ЮЗЕРОВ/ЛИМИТОВ ----------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
@@ -214,23 +287,28 @@ def _hist_user_dir(uid: int) -> str:
     return p
 
 def save_history(uid: int, mode: str, jpeg_bytes: bytes, text: str) -> None:
-    """Сохраняем jpg + txt, добавляем запись в индекс. Храним до HISTORY_LIMIT записей."""
-    ts = int(time.time())
-    udir = _hist_user_dir(uid)
-    img_path = os.path.join(udir, f"{ts}.jpg")
-    txt_path = os.path.join(udir, f"{ts}.txt")
+    """Безопасная запись истории: не падаем при ошибках диска/прав."""
+    if not HISTORY_ENABLED:
+        return
+    try:
+        ts = int(time.time())
+        udir = _hist_user_dir(uid)
+        img_path = os.path.join(udir, f"{ts}.jpg")
+        txt_path = os.path.join(udir, f"{ts}.txt")
 
-    with open(img_path, "wb") as f:
-        f.write(jpeg_bytes)
-    with open(txt_path, "w", encoding="utf-8") as f:
-        f.write(text)
+        with open(img_path, "wb") as f:
+            f.write(jpeg_bytes)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(text)
 
-    key = str(uid)
-    items = HISTORY.get(key, [])
-    items.append({"ts": ts, "mode": mode, "img": img_path, "txt": txt_path})
-    items = sorted(items, key=lambda x: x["ts"], reverse=True)[:HISTORY_LIMIT]
-    HISTORY[key] = items
-    persist_all()
+        key = str(uid)
+        items = HISTORY.get(key, [])
+        items.append({"ts": ts, "mode": mode, "img": img_path, "txt": txt_path})
+        items = sorted(items, key=lambda x: x["ts"], reverse=True)[:HISTORY_LIMIT]
+        HISTORY[key] = items
+        persist_all()
+    except Exception as e:
+        log.warning("history save failed: %s", e)
 
 def list_history(uid: int) -> List[Dict[str, Any]]:
     return HISTORY.get(str(uid), [])
@@ -303,7 +381,7 @@ def admin_bonus_kb() -> InlineKeyboardMarkup:
     ])
 
 # ---------- АНАЛИЗ ----------
-async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dict, user_id: int):
+async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dict, user_id: int, username: str | None):
     ensure_user(user_id)
     if not check_usage(user_id):
         return await chat.send_message(
@@ -333,8 +411,11 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
         if len(text) > 1800:
             text = text[:1800] + "\n\n<i>Сокращено.</i>"
 
-        # сохраняем в историю
+        # История (безопасно)
         save_history(user_id, mode, jpeg_bytes, text)
+
+        # Google Sheets лог
+        sheets_log_analysis(user_id, username, mode, text)
 
         try:
             await chat.send_message(text, parse_mode="HTML", reply_markup=action_keyboard(user_id, user_data))
@@ -357,6 +438,8 @@ async def send_home(chat, user_id: int, user_data: dict):
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id; ensure_user(uid)
+    # лог пользователя в Google Sheets
+    sheets_log_user(uid, getattr(update.effective_user, "username", None))
     await send_home(update.effective_chat, uid, context.user_data)
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -367,7 +450,11 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     LAST_ANALYSIS_AT[uid] = now
     file = await update.message.photo[-1].get_file()
     buf = io.BytesIO(); await file.download_to_memory(out=buf)
-    await _process_image_bytes(update.effective_chat, buf.getvalue(), get_mode(context.user_data), context.user_data, uid)
+    await _process_image_bytes(
+        update.effective_chat, buf.getvalue(),
+        get_mode(context.user_data), context.user_data,
+        uid, getattr(update.effective_user, "username", None)
+    )
 
 # ---------- КОЛБЭКИ (кнопки) ----------
 ADMIN_STATE: Dict[int, Dict[str, Any]] = {}
@@ -453,9 +540,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "fb:up":
         FEEDBACK["up"] = FEEDBACK.get("up", 0) + 1; persist_all()
+        sheets_log_feedback(uid, "up")
         return await q.answer("Спасибо!", show_alert=False)
     if data == "fb:down":
         FEEDBACK["down"] = FEEDBACK.get("down", 0) + 1; persist_all()
+        sheets_log_feedback(uid, "down")
         return await q.answer("Принято 👍", show_alert=False)
 
     # Админка
@@ -604,19 +693,62 @@ async def on_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ADMIN_STATE.pop(admin_id, None)
         return await update.message.reply_text(f"✅ Цена обновлена: {CONFIG['PRICE_RUB']} ₽", reply_markup=admin_settings_kb())
 
+# ---------- КОМАНДЫ-ДИАГНОСТИКА ----------
+async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("pong")
+
+async def on_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in ADMINS:
+        return await update.message.reply_text("Недостаточно прав.")
+    total_users = len(USERS)
+    premium_users = sum(1 for u in USAGE.values() if u.get("premium"))
+    limit = int(CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT))
+    price = int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
+
+    hist_path = os.path.abspath(HISTORY_DIR)
+    hist_ok = True
+    try:
+        if HISTORY_ENABLED:
+            test_file = os.path.join(HISTORY_DIR, ".wtest")
+            with open(test_file, "w") as f:
+                f.write("ok")
+            os.remove(test_file)
+    except Exception:
+        hist_ok = False
+
+    txt = (
+        "<b>Диагностика</b>\n"
+        f"• Users: {total_users}\n"
+        f"• Premium: {premium_users}\n"
+        f"• FREE_LIMIT: {limit}\n"
+        f"• PRICE: {price} ₽\n"
+        f"• History: {'on' if HISTORY_ENABLED else 'off'}\n"
+        f"• History dir: {hist_path}\n"
+        f"• Writable: {'yes' if hist_ok else 'no'}\n"
+        f"• DATA_DIR: {os.path.abspath(DATA_DIR)}\n"
+        f"• Sheets: {'connected' if _sh else 'off'}\n"
+    )
+    await update.message.reply_text(txt, parse_mode="HTML")
+
 # ---------- HEALTHZ ----------
 def start_flask_healthz(port: int):
     app = Flask(__name__)
+
     @app.get("/healthz")
-    def healthz(): return "ok", 200
+    def healthz():
+        return "ok", 200
+
     th = Thread(target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False))
-    th.daemon = True; th.start()
+    th.daemon = True
+    th.start()
+    log.info("Flask /healthz running on port %s", port)
 
 # ---------- MAIN ----------
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Профиль: Conversation и старт по кнопке/команде
+    # Профиль: Conversation (кнопка + команда)
     profile_conv = ConversationHandler(
         entry_points=[CommandHandler("profile", profile_start_cmd),
                       CallbackQueryHandler(profile_start_cb, pattern="^profile$")],
@@ -632,16 +764,23 @@ def main():
     )
     app.add_handler(profile_conv)
 
+    # Базовые команды
     app.add_handler(CommandHandler("start", on_start))
-    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
+    app.add_handler(CommandHandler("ping", on_ping))
+    app.add_handler(CommandHandler("diag", on_diag))
 
+    # Фото и кнопки
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    # текстовые сообщения для админ-режимов (последним)
+    # Текст для админ-режимов (последним)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_admin_text))
 
-    # Healthz (оставляем, чтобы внешний пинг не усыплял сервис)
+    # Healthz для Render
     start_flask_healthz(PORT)
+
+    # Google Sheets
+    sheets_init()
 
     app.run_polling()
 
