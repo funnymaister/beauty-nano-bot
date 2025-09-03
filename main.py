@@ -4,6 +4,7 @@ import re
 import time
 import json
 import base64
+import asyncio
 import logging
 from datetime import datetime
 from threading import Thread
@@ -31,6 +32,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s | %(message)s"
 )
 log = logging.getLogger("beauty-nano-bot")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("gspread").setLevel(logging.WARNING)
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 # ---------- КОНФИГ ----------
 load_dotenv()
@@ -40,6 +45,9 @@ PORT = int(os.getenv("PORT", "8080"))
 RATE_LIMIT_SECONDS = int(os.getenv("RATE_LIMIT_SECONDS", "10"))
 DEFAULT_FREE_LIMIT = int(os.getenv("FREE_LIMIT", "5"))
 DEFAULT_PRICE_RUB = int(os.getenv("PRICE_RUB", "299"))
+
+# Перфоманс
+IMAGE_MAX_SIDE = int(os.getenv("IMAGE_MAX_SIDE", "896"))
 
 # Хранилище файлов (история/индексы)
 DATA_DIR = os.getenv("DATA_DIR", "./data")
@@ -83,17 +91,25 @@ def save_json(path: str, data):
     except Exception as e:
         log.warning("Can't save %s: %s", path, e)
 
-# seed админов из ENV
-seed_admins = set()
-if os.getenv("ADMIN_IDS"):
-    try:
-        seed_admins = set(int(x.strip()) for x in os.getenv("ADMIN_IDS").split(",") if x.strip().isdigit())
-    except Exception:
-        pass
+# ---------- АДМИНЫ (исправлено) ----------
+def parse_admin_ids(val: str | None) -> set[int]:
+    """ADMIN_IDS в .env: '123,456; 789' -> {123,456,789}"""
+    if not val:
+        return set()
+    raw = val.replace(";", ",")
+    ids = set()
+    for p in raw.split(","):
+        p = p.strip()
+        if p.isdigit():
+            ids.add(int(p))
+    return ids
 
-ADMINS: set[int] = set(load_json(ADMINS_FILE, list(seed_admins)))
-if not ADMINS and seed_admins:
-    ADMINS = set(seed_admins)
+seed_admins: set[int] = parse_admin_ids(os.getenv("ADMIN_IDS"))
+
+# всегда читаем файл, затем ДОБАВЛЯЕМ seed из ENV и сохраняем
+ADMINS: set[int] = set(load_json(ADMINS_FILE, []))
+if seed_admins:
+    ADMINS |= seed_admins
 save_json(ADMINS_FILE, list(ADMINS))
 
 USERS: set[int] = set(load_json(USERS_FILE, []))
@@ -128,7 +144,6 @@ def _ensure_ws(title: str, headers: List[str]):
         return ws
 
 def sheets_init():
-    """Подключаемся к Google Sheets, создаём листы."""
     global _gc, _sh
     if not SHEETS_ENABLED:
         log.info("Sheets disabled by env")
@@ -251,7 +266,7 @@ async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Ок, отменил настройку профиля. /profile — начать заново.")
     return ConversationHandler.END
 
-# ---------- ХЕЛПЕРЫ ЮЗЕРОВ/ЛИМИТОВ ----------
+# ---------- ХЕЛПЕРЫ ----------
 def is_admin(user_id: int) -> bool:
     return user_id in ADMINS
 def ensure_user(user_id: int):
@@ -299,7 +314,6 @@ PHOTO_TIPS_PATTERNS = [
 _photo_tips_rx = re.compile("|".join(PHOTO_TIPS_PATTERNS), re.IGNORECASE | re.UNICODE)
 
 def remove_photo_tips(text: str) -> str:
-    """Удаляет абзацы, где есть советы по улучшению фотографий."""
     parts = re.split(r"\n{2,}", (text or "").strip())
     kept = []
     for p in parts:
@@ -309,14 +323,13 @@ def remove_photo_tips(text: str) -> str:
     result = "\n\n".join(kept).strip()
     return result or text
 
-# ---------- ИСТОРИЯ ----------
+# ---------- История ----------
 def _hist_user_dir(uid: int) -> str:
     p = os.path.join(HISTORY_DIR, str(uid))
     os.makedirs(p, exist_ok=True)
     return p
 
 def save_history(uid: int, mode: str, jpeg_bytes: bytes, text: str) -> None:
-    """Безопасная запись истории: не падаем при ошибках диска/прав."""
     if not HISTORY_ENABLED:
         return
     try:
@@ -324,12 +337,10 @@ def save_history(uid: int, mode: str, jpeg_bytes: bytes, text: str) -> None:
         udir = _hist_user_dir(uid)
         img_path = os.path.join(udir, f"{ts}.jpg")
         txt_path = os.path.join(udir, f"{ts}.txt")
-
         with open(img_path, "wb") as f:
             f.write(jpeg_bytes)
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(text)
-
         key = str(uid)
         items = HISTORY.get(key, [])
         items.append({"ts": ts, "mode": mode, "img": img_path, "txt": txt_path})
@@ -409,6 +420,10 @@ def admin_bonus_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅️ Назад", callback_data="admin")]
     ])
 
+# ---------- HELPER: run blocking ----------
+async def run_blocking(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
 # ---------- АНАЛИЗ ----------
 async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dict, user_id: int, username: str | None):
     ensure_user(user_id)
@@ -421,10 +436,13 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
             ])
         )
     try:
-        im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        im.thumbnail((1024, 1024))
-        buf = io.BytesIO(); im.save(buf, format="JPEG", quality=85)
-        jpeg_bytes = buf.getvalue()
+        def _prep(img_bytes: bytes) -> bytes:
+            im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            im.thumbnail((IMAGE_MAX_SIDE, IMAGE_MAX_SIDE))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=85, optimize=True)
+            return buf.getvalue()
+        jpeg_bytes = await run_blocking(_prep, img_bytes)
     except Exception:
         log.exception("PIL convert error")
         return await chat.send_message("Не удалось обработать фото. Попробуй другое.")
@@ -443,20 +461,27 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
         {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
     ]
     try:
-        response = model.generate_content(payload)
+        response = await run_blocking(model.generate_content, payload)
         text = (getattr(response, "text", "") or "").strip() or "Ответ пустой."
-
-        # вырезаем любые советы про «сделай/пересними/освещение/ракурс» и т.п.
         text = remove_photo_tips(text)
-
         if len(text) > 1800:
             text = text[:1800] + "\n\n<i>Сокращено.</i>"
 
-        # История (безопасно)
-        save_history(user_id, mode, jpeg_bytes, text)
+        async def _save_history():
+            try:
+                await run_blocking(save_history, user_id, mode, jpeg_bytes, text)
+            except Exception as e:
+                log.warning("history async failed: %s", e)
 
-        # Google Sheets лог
-        sheets_log_analysis(user_id, username, mode, text)
+        async def _log_sheets():
+            try:
+                sheets_log_analysis(user_id, username, mode, text)
+            except Exception as e:
+                log.warning("sheets async failed: %s", e)
+
+        asyncio.create_task(_save_history())
+        if SHEETS_ENABLED and _sh:
+            asyncio.create_task(_log_sheets())
 
         try:
             await chat.send_message(text, parse_mode="HTML", reply_markup=action_keyboard(user_id, user_data))
@@ -479,7 +504,6 @@ async def send_home(chat, user_id: int, user_data: dict):
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id; ensure_user(uid)
-    # лог пользователя в Google Sheets
     sheets_log_user(uid, getattr(update.effective_user, "username", None))
     await send_home(update.effective_chat, uid, context.user_data)
 
@@ -497,7 +521,7 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid, getattr(update.effective_user, "username", None)
     )
 
-# ---------- КОЛБЭКИ (кнопки) ----------
+# ---------- КНОПКИ ----------
 ADMIN_STATE: Dict[int, Dict[str, Any]] = {}
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -505,12 +529,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = (q.data or "").strip()
     uid = update.effective_user.id; ensure_user(uid)
 
-    # Домой
     if data == "home":
         await q.answer()
         return await send_home(update.effective_chat, uid, context.user_data)
 
-    # Режимы
     if data == "mode_menu":
         await q.answer()
         current = get_mode(context.user_data)
@@ -525,7 +547,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Режим установлен: {MODES[mode]}\nПришли фото.", reply_markup=action_keyboard(uid, context.user_data)
         )
 
-    # История
     if data == "history":
         await q.answer()
         items = list_history(uid)
@@ -555,7 +576,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(caption)
         return await q.message.reply_text("Выбери другую запись:", reply_markup=history_keyboard(uid))
 
-    # Лимиты/премиум/фидбек
     if data == "limits":
         await q.answer()
         return await q.message.reply_text(get_usage_text(uid))
@@ -588,7 +608,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheets_log_feedback(uid, "down")
         return await q.answer("Принято 👍", show_alert=False)
 
-    # Админка
     if data == "admin":
         if not is_admin(uid):
             return await q.answer("Недостаточно прав", show_alert=True)
@@ -639,7 +658,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(f"Текущая цена={CONFIG.get('PRICE_RUB')} ₽. Введи новую цену (целое).",
                                               reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:settings")]]))
 
-# ---------- АДМИН ТЕКСТОВЫЕ РЕЖИМЫ ----------
+# ---------- АДМИН: текстовые режимы ----------
 def extract_user_id_from_message(update: Update) -> int | None:
     if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
         return update.message.reply_to_message.from_user.id
@@ -650,8 +669,6 @@ def extract_user_id_from_message(update: Update) -> int | None:
         if parts and parts[0].isdigit():
             return int(parts[0])
     return None
-
-ADMIN_STATE: Dict[int, Dict[str, Any]] = {}
 
 async def on_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_id = update.effective_user.id
@@ -664,14 +681,12 @@ async def on_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "broadcast":
         text = update.message.text or ""
-        sent = 0; failed = 0
+        sent, failed = 0, 0
         for uid in list(USERS):
             try:
                 await context.bot.send_message(uid, f"📣 Сообщение от администратора:\n\n{text}")
                 sent += 1
-            except Forbidden:
-                failed += 1
-            except Exception:
+            except (Forbidden, Exception):
                 failed += 1
         ADMIN_STATE.pop(admin_id, None)
         return await update.message.reply_text(f"Готово. Успешно: {sent}, ошибок: {failed}.", reply_markup=admin_root_kb())
@@ -734,7 +749,23 @@ async def on_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ADMIN_STATE.pop(admin_id, None)
         return await update.message.reply_text(f"✅ Цена обновлена: {CONFIG['PRICE_RUB']} ₽", reply_markup=admin_settings_kb())
 
-# ---------- КОМАНДЫ-ДИАГНОСТИКА ----------
+# ---------- КОМАНДЫ СЕРВИСНЫЕ ----------
+async def cmd_whoami(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    u = update.effective_user
+    await update.message.reply_text(f"Твой user_id: <code>{u.id}</code>", parse_mode="HTML")
+
+async def cmd_make_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Назначить админа: доступно только тем, кто указан в ADMIN_IDS (seed_admins)."""
+    caller_id = update.effective_user.id
+    if caller_id not in seed_admins:
+        return await update.message.reply_text("Недостаточно прав.")
+    if not context.args or not context.args[0].isdigit():
+        return await update.message.reply_text("Использование: /make_admin <user_id>")
+    target = int(context.args[0])
+    ADMINS.add(target)
+    persist_all()
+    await update.message.reply_text(f"✅ Пользователь {target} назначен администратором.")
+
 async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("pong")
 
@@ -789,7 +820,6 @@ def start_flask_healthz(port: int):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Профиль: Conversation (кнопка + команда)
     profile_conv = ConversationHandler(
         entry_points=[CommandHandler("profile", profile_start_cmd),
                       CallbackQueryHandler(profile_start_cb, pattern="^profile$")],
@@ -805,24 +835,18 @@ def main():
     )
     app.add_handler(profile_conv)
 
-    # Базовые команды
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("ping", on_ping))
     app.add_handler(CommandHandler("diag", on_diag))
+    app.add_handler(CommandHandler("whoami", cmd_whoami))
+    app.add_handler(CommandHandler("make_admin", cmd_make_admin))
 
-    # Фото и кнопки
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
-
-    # Текст для админ-режимов (последним)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_admin_text))
 
-    # Healthz для Render
     start_flask_healthz(PORT)
-
-    # Google Sheets
     sheets_init()
-
     app.run_polling()
 
 if __name__ == "__main__":
