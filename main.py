@@ -7,7 +7,7 @@ import base64
 import logging
 from datetime import datetime
 from threading import Thread
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from dotenv import load_dotenv
 from PIL import Image
@@ -51,6 +51,11 @@ USAGE_FILE = os.path.join(DATA_DIR, "usage.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 FEEDBACK_FILE = os.path.join(DATA_DIR, "feedback.json")
 
+# --- История (индекс + файлы) ---
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")   # индекс истории
+HISTORY_DIR  = os.path.join(DATA_DIR, "history")        # каталог с jpg/txt
+os.makedirs(HISTORY_DIR, exist_ok=True)
+
 def load_json(path: str, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -83,12 +88,17 @@ USAGE: Dict[int, Dict[str, Any]] = {int(k): v for k, v in load_json(USAGE_FILE, 
 CONFIG: Dict[str, Any] = load_json(CONFIG_FILE, {"FREE_LIMIT": DEFAULT_FREE_LIMIT, "PRICE_RUB": DEFAULT_PRICE_RUB})
 FEEDBACK: Dict[str, int] = load_json(FEEDBACK_FILE, {"up": 0, "down": 0})
 
+# индекс истории: user_id(str) -> [{ts, mode, img, txt}]
+HISTORY: Dict[str, List[Dict[str, Any]]] = load_json(HISTORY_FILE, {})
+HISTORY_LIMIT = 10
+
 def persist_all():
     save_json(ADMINS_FILE, list(ADMINS))
     save_json(USERS_FILE, list(USERS))
     save_json(USAGE_FILE, USAGE)
     save_json(CONFIG_FILE, CONFIG)
     save_json(FEEDBACK_FILE, FEEDBACK)
+    save_json(HISTORY_FILE, HISTORY)
 
 # ---------- GEMINI ----------
 genai.configure(api_key=GEMINI_API_KEY)
@@ -197,6 +207,46 @@ def get_usage_text(user_id: int) -> str:
     left = max(0, limit - u["count"])
     return f"Осталось бесплатных анализов в этом месяце: {left} из {limit}."
 
+# ---------- ИСТОРИЯ ----------
+def _hist_user_dir(uid: int) -> str:
+    p = os.path.join(HISTORY_DIR, str(uid))
+    os.makedirs(p, exist_ok=True)
+    return p
+
+def save_history(uid: int, mode: str, jpeg_bytes: bytes, text: str) -> None:
+    """Сохраняем jpg + txt, добавляем запись в индекс. Храним до HISTORY_LIMIT записей."""
+    ts = int(time.time())
+    udir = _hist_user_dir(uid)
+    img_path = os.path.join(udir, f"{ts}.jpg")
+    txt_path = os.path.join(udir, f"{ts}.txt")
+
+    with open(img_path, "wb") as f:
+        f.write(jpeg_bytes)
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    key = str(uid)
+    items = HISTORY.get(key, [])
+    items.append({"ts": ts, "mode": mode, "img": img_path, "txt": txt_path})
+    items = sorted(items, key=lambda x: x["ts"], reverse=True)[:HISTORY_LIMIT]
+    HISTORY[key] = items
+    persist_all()
+
+def list_history(uid: int) -> List[Dict[str, Any]]:
+    return HISTORY.get(str(uid), [])
+
+def history_keyboard(uid: int) -> InlineKeyboardMarkup:
+    entries = list_history(uid)
+    if not entries:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="home")]])
+    rows: List[List[InlineKeyboardButton]] = []
+    for e in entries[:10]:
+        dt = datetime.fromtimestamp(e["ts"]).strftime("%d.%m %H:%M")
+        title = f"{dt} • {MODES.get(e.get('mode','both'),'')}"
+        rows.append([InlineKeyboardButton(title, callback_data=f"hist:{e['ts']}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
 # ---------- КЛАВИАТУРЫ ----------
 def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKeyboardMarkup:
     premium = usage_entry(for_user_id).get("premium", False)
@@ -204,6 +254,7 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
         [InlineKeyboardButton("🔄 Новый анализ", callback_data="home")],
         [InlineKeyboardButton("⚙️ Режим", callback_data="mode_menu")],
         [InlineKeyboardButton("🧑‍💼 Профиль", callback_data="profile")],
+        [InlineKeyboardButton("🗂 История", callback_data="history")],
         [InlineKeyboardButton("👍 Полезно", callback_data="fb:up"),
          InlineKeyboardButton("👎 Не очень", callback_data="fb:down")],
         [InlineKeyboardButton("ℹ️ Лимиты", callback_data="limits")]
@@ -270,6 +321,7 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
     except Exception:
         log.exception("PIL convert error")
         return await chat.send_message("Не удалось обработать фото. Попробуй другое.")
+
     b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
     payload = [
         f"Ты бьюти-ассистент. Фото для режима {mode}. Дай структурные рекомендации.",
@@ -278,12 +330,18 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
     try:
         response = model.generate_content(payload)
         text = (getattr(response, "text", "") or "").strip() or "Ответ пустой."
-        if len(text) > 1800: text = text[:1800] + "\n\n<i>Сокращено.</i>"
+        if len(text) > 1800:
+            text = text[:1800] + "\n\n<i>Сокращено.</i>"
+
+        # сохраняем в историю
+        save_history(user_id, mode, jpeg_bytes, text)
+
         try:
             await chat.send_message(text, parse_mode="HTML", reply_markup=action_keyboard(user_id, user_data))
         except BadRequest:
             safe = re.sub(r"<[^>]+>", "", text)
             await chat.send_message(safe, reply_markup=action_keyboard(user_id, user_data))
+
         await chat.send_message(get_usage_text(user_id))
     except Exception as e:
         log.exception("Gemini error")
@@ -292,7 +350,7 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
 # ---------- ОБЩИЕ ХЭНДЛЕРЫ ----------
 async def send_home(chat, user_id: int, user_data: dict):
     await chat.send_message(
-        "Привет! Я Beauty Nano Bot 💇‍♀️🤖\nПришли фото, я дам рекомендации.\nБесплатные анализы каждый месяц.",
+        "Привет! Я Beauty Nano Bot 💇‍♀️🤖\nПришли фото — дам рекомендации.\nБесплатные анализы каждый месяц.",
         reply_markup=action_keyboard(user_id, user_data)
     )
     await chat.send_message(get_usage_text(user_id))
@@ -319,17 +377,18 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = (q.data or "").strip()
     uid = update.effective_user.id; ensure_user(uid)
 
-    # Общие кнопки
+    # Домой
     if data == "home":
-        await q.answer(); return await send_home(update.effective_chat, uid, context.user_data)
+        await q.answer()
+        return await send_home(update.effective_chat, uid, context.user_data)
 
+    # Режимы
     if data == "mode_menu":
         await q.answer()
         current = get_mode(context.user_data)
         return await q.message.reply_text(
             f"Текущий режим: {MODES[current]}\nВыбери другой:", reply_markup=mode_keyboard(current)
         )
-
     if data.startswith("mode:"):
         await q.answer("Режим обновлён")
         mode = data.split(":", 1)[1]
@@ -338,8 +397,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Режим установлен: {MODES[mode]}\nПришли фото.", reply_markup=action_keyboard(uid, context.user_data)
         )
 
+    # История
+    if data == "history":
+        await q.answer()
+        items = list_history(uid)
+        if not items:
+            return await q.message.reply_text(
+                "История пуста. Пришли фото — и анализ попадёт сюда.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="home")]])
+            )
+        return await q.message.reply_text("Твоя история (последние 10):", reply_markup=history_keyboard(uid))
+
+    if data.startswith("hist:"):
+        await q.answer()
+        ts_str = data.split(":", 1)[1]
+        rec = next((r for r in list_history(uid) if str(r["ts"]) == ts_str), None)
+        if not rec:
+            return await q.message.reply_text("Запись не найдена.", reply_markup=history_keyboard(uid))
+        try:
+            with open(rec["txt"], "r", encoding="utf-8") as f:
+                txt = f.read()
+        except Exception:
+            txt = "(не удалось прочитать текст)"
+        caption = txt[:1024] if txt else f"Режим: {MODES.get(rec.get('mode','both'),'')}"
+        try:
+            with open(rec["img"], "rb") as ph:
+                await q.message.reply_photo(photo=ph, caption=caption)
+        except Exception:
+            await q.message.reply_text(caption)
+        return await q.message.reply_text("Выбери другую запись:", reply_markup=history_keyboard(uid))
+
+    # Лимиты/премиум/фидбек
     if data == "limits":
-        await q.answer(); return await q.message.reply_text(get_usage_text(uid))
+        await q.answer()
+        return await q.message.reply_text(get_usage_text(uid))
 
     if data == "premium":
         await q.answer()
@@ -353,10 +444,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     if data == "buy":
         u = usage_entry(uid); u["premium"] = True; persist_all()
-        await q.answer(); return await q.message.reply_text("✅ Премиум активирован!", reply_markup=action_keyboard(uid, context.user_data))
+        await q.answer()
+        return await q.message.reply_text("✅ Премиум активирован!", reply_markup=action_keyboard(uid, context.user_data))
     if data == "renew":
         u = usage_entry(uid); u["premium"] = True; persist_all()
-        await q.answer("Продлено"); return await q.message.edit_text("Премиум продлён ✅", reply_markup=action_keyboard(uid, context.user_data))
+        await q.answer("Продлено")
+        return await q.message.edit_text("Премиум продлён ✅", reply_markup=action_keyboard(uid, context.user_data))
 
     if data == "fb:up":
         FEEDBACK["up"] = FEEDBACK.get("up", 0) + 1; persist_all()
@@ -367,11 +460,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Админка
     if data == "admin":
-        if not is_admin(uid): return await q.answer("Недостаточно прав", show_alert=True)
-        await q.answer(); return await q.message.reply_text("🛠 Админ-панель", reply_markup=admin_root_kb())
+        if not is_admin(uid):
+            return await q.answer("Недостаточно прав", show_alert=True)
+        await q.answer()
+        return await q.message.reply_text("🛠 Админ-панель", reply_markup=admin_root_kb())
 
     if data.startswith("admin:"):
-        if not is_admin(uid): return await q.answer("Недостаточно прав", show_alert=True)
+        if not is_admin(uid):
+            return await q.answer("Недостаточно прав", show_alert=True)
         await q.answer()
         cmd = data.split(":", 1)[1]
         if cmd == "users":
@@ -430,10 +526,10 @@ ADMIN_STATE: Dict[int, Dict[str, Any]] = {}
 async def on_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_id = update.effective_user.id
     if not is_admin(admin_id):
-        return  # не админ — игнор
+        return
     st = ADMIN_STATE.get(admin_id)
     if not st:
-        return  # нет активного режима
+        return
     mode = st.get("mode")
 
     if mode == "broadcast":
@@ -487,19 +583,23 @@ async def on_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u = usage_entry(target_id)
         u["count"] = max(0, u.get("count", 0) - add_n)
         persist_all()
-        return await update.message.reply_text(f"✅ Добавил {add_n} анализов пользователю {target_id}. Текущее использовано: {u['count']}.",
-                                               reply_markup=admin_users_kb())
+        return await update.message.reply_text(
+            f"✅ Добавил {add_n} анализов пользователю {target_id}. Текущее использовано: {u['count']}.",
+            reply_markup=admin_users_kb()
+        )
 
     if mode == "set_limit":
         txt = (update.message.text or "").strip()
-        if not txt.isdigit(): return await update.message.reply_text("Введи целое число.")
+        if not txt.isdigit():
+            return await update.message.reply_text("Введи целое число.")
         CONFIG["FREE_LIMIT"] = int(txt); persist_all()
         ADMIN_STATE.pop(admin_id, None)
         return await update.message.reply_text(f"✅ FREE_LIMIT обновлён: {CONFIG['FREE_LIMIT']}", reply_markup=admin_settings_kb())
 
     if mode == "set_price":
         txt = (update.message.text or "").strip()
-        if not txt.isdigit(): return await update.message.reply_text("Введи целую цену (₽).")
+        if not txt.isdigit():
+            return await update.message.reply_text("Введи целую цену (₽).")
         CONFIG["PRICE_RUB"] = int(txt); persist_all()
         ADMIN_STATE.pop(admin_id, None)
         return await update.message.reply_text(f"✅ Цена обновлена: {CONFIG['PRICE_RUB']} ₽", reply_markup=admin_settings_kb())
@@ -516,7 +616,7 @@ def start_flask_healthz(port: int):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Профиль: Conversation и вход либо по команде, либо по кнопке callback "profile"
+    # Профиль: Conversation и старт по кнопке/команде
     profile_conv = ConversationHandler(
         entry_points=[CommandHandler("profile", profile_start_cmd),
                       CallbackQueryHandler(profile_start_cb, pattern="^profile$")],
@@ -532,17 +632,17 @@ def main():
     )
     app.add_handler(profile_conv)
 
-    # Базовые
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
 
-    # Общие кнопки/админка
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    # Текст админ-режимов (последним, чтобы не перебивать профильный диалог)
+    # текстовые сообщения для админ-режимов (последним)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_admin_text))
 
+    # Healthz (оставляем, чтобы внешний пинг не усыплял сервис)
     start_flask_healthz(PORT)
+
     app.run_polling()
 
 if __name__ == "__main__":
