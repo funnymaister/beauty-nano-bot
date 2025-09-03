@@ -280,6 +280,35 @@ def get_usage_text(user_id: int) -> str:
     left = max(0, limit - u["count"])
     return f"Осталось бесплатных анализов в этом месяце: {left} из {limit}."
 
+# ---------- ФИЛЬТР: убрать советы про фото ----------
+PHOTO_TIPS_PATTERNS = [
+    r"улучш(ить|ения?)\s+(качества|фото|изображения)",
+    r"качество\s+(фото|изображения)",
+    r"освещени[ея]",
+    r"ракурс",
+    r"(камера|объектив|смартфон|зеркалк)",
+    r"сделай(те)?\s+фото",
+    r"пересним(и|ите)",
+    r"перефотографируй(те)?",
+    r"фон.*(равномерн|однотонн)",
+    r"резкост[ьи]",
+    r"шум(ы)?\s+на\s+фото",
+    r"неч[её]тк(о|ость)|размыто",
+    r"увеличь(те)?\s+разрешение",
+]
+_photo_tips_rx = re.compile("|".join(PHOTO_TIPS_PATTERNS), re.IGNORECASE | re.UNICODE)
+
+def remove_photo_tips(text: str) -> str:
+    """Удаляет абзацы, где есть советы по улучшению фотографий."""
+    parts = re.split(r"\n{2,}", (text or "").strip())
+    kept = []
+    for p in parts:
+        if _photo_tips_rx.search(p):
+            continue
+        kept.append(p)
+    result = "\n\n".join(kept).strip()
+    return result or text
+
 # ---------- ИСТОРИЯ ----------
 def _hist_user_dir(uid: int) -> str:
     p = os.path.join(HISTORY_DIR, str(uid))
@@ -402,12 +431,24 @@ async def _process_image_bytes(chat, img_bytes: bytes, mode: str, user_data: dic
 
     b64 = base64.b64encode(jpeg_bytes).decode("utf-8")
     payload = [
-        f"Ты бьюти-ассистент. Фото для режима {mode}. Дай структурные рекомендации.",
+        (
+            "Ты бьюти-ассистент. Проанализируй фото в контексте режима: "
+            f"{mode}. Дай чёткие, практичные рекомендации по уходу/стайлингу/"
+            "подбору средств (названия классов ингредиентов, форм-факторов), "
+            "структурируй списками и блоками.\n\n"
+            "ВАЖНО: НЕ давай никаких советов по улучшению качества фотографии, "
+            "освещению, ракурсу, камере и т.п. Никаких фраз про «переснять/сделать фото заново»."
+            " Оцени и советуй ИСКЛЮЧИТЕЛЬНО по уходу и продуктам."
+        ),
         {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
     ]
     try:
         response = model.generate_content(payload)
         text = (getattr(response, "text", "") or "").strip() or "Ответ пустой."
+
+        # вырезаем любые советы про «сделай/пересними/освещение/ракурс» и т.п.
+        text = remove_photo_tips(text)
+
         if len(text) > 1800:
             text = text[:1800] + "\n\n<i>Сокращено.</i>"
 
