@@ -69,7 +69,7 @@ def save_json(path, data):
     except Exception as e:
         log.warning("Can't save %s: %s", path, e)
 
-# ---------- АДМИНЫ (фикс парсинга и инициации) ----------
+# ---------- АДМИНЫ ----------
 def parse_admin_ids(val: str | None) -> set[int]:
     if not val: return set()
     raw = val.replace(";", ",").replace(" ", ",")
@@ -152,7 +152,7 @@ def sheets_log_feedback(user_id: int, value: str):
         _sh.worksheet("feedback").append_row([int(time.time()), user_id, value], value_input_option="USER_ENTERED")
     except Exception as e: log.warning("sheets_log_feedback failed: %s", e)
 
-# ---------- МЕЛОЧИ ----------
+# ---------- СОСТОЯНИЯ, РЕЖИМЫ, ПРОФИЛЬ ----------
 LAST_ANALYSIS_AT: Dict[int, float] = {}
 
 MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо+Волосы"}
@@ -222,7 +222,7 @@ def get_usage_text(user_id:int)->str:
     left=max(0, limit-u["count"])
     return f"Осталось бесплатных анализов: {left} из {limit}."
 
-# убрать советы «переснять фото»
+# ---------- ФИЛЬТР «не советовать переснимать» ----------
 PHOTO_TIPS_PATTERNS=[r"улучш(ить|ения?)\s+(качества|фото|изображения)",r"качество\s+(фото|изображения)",r"освещени[ея]",r"ракурс",r"(камера|объектив|смартфон|зеркалк)",r"сделай(те)?\s+фото",r"пересним(и|ите)",r"перефотографируй(те)?",r"фон.*(равномерн|однотонн)",r"резкост[ьи]",r"шум(ы)?\s+на\s+фото",r"неч[её]тк(о|ость)|размыто",r"увеличь(те)?\s+разрешение"]
 _photo_tips_rx=re.compile("|".join(PHOTO_TIPS_PATTERNS), re.IGNORECASE|re.UNICODE)
 def remove_photo_tips(text:str)->str:
@@ -233,16 +233,121 @@ def remove_photo_tips(text:str)->str:
     result="\n\n".join(kept).strip()
     return result or text
 
+# ---------- НОВЫЙ СТИЛЬ ОТВЕТА + ДЛИННЫЕ СООБЩЕНИЯ ----------
+SAFE_CHUNK = 3500  # запас под HTML/кнопки
+
+def html_escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _emoji_bullets(text: str) -> str:
+    """Меняем дефисы/звёздочки/точки на цветные буллеты."""
+    colors = ["🟢", "🟡", "🔵", "🟣", "🟠"]
+    i = 0
+    out_lines = []
+    for line in text.splitlines():
+        if re.match(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", line):
+            bullet = colors[i % len(colors)]
+            i += 1
+            line = re.sub(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", bullet + " ", line)
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+def _themed_headings(text: str) -> str:
+    """
+    Выделяем строки-заголовки и подставляем эмодзи:
+    Утро/День/Вечер/Ночь/Ночной/Рекомендации/Советы/SOS
+    """
+    lines = text.splitlines()
+    themed = []
+    for ln in lines:
+        m = re.match(r"^\s*(утро|день|вечер|ноч[ььи]|ночной|sos|советы|рекомендац(ии|ия))\b[:\-–]?\s*(.*)$", ln, flags=re.I)
+        if m:
+            key = m.group(1).lower()
+            rest = m.group(3)
+            emo = "✨"
+            if key.startswith("утро"): emo = "☀️"
+            elif key.startswith("день"): emo = "🌤️"
+            elif key.startswith("вечер"): emo = "🌙"
+            elif key.startswith("ноч"): emo = "🌘"
+            elif key.startswith("ночной"): emo = "🌘"
+            elif key == "sos": emo = "🚑"
+            elif key.startswith("советы") or key.startswith("рекомендац"): emo = "🎯"
+            title = key.capitalize()
+            ln = f"<b>{emo} {html_escape(title)}</b>"
+            if rest:
+                ln += f"\n{html_escape(rest)}"
+            themed.append(ln)
+        else:
+            themed.append(html_escape(ln))
+    return "\n".join(themed)
+
+def style_response(raw_text: str, mode: str, profile: dict | None = None) -> str:
+    # 1) нормализуем переносы
+    txt = raw_text.strip().replace("\r\n", "\n").replace("\r", "\n")
+
+    # 2) буллеты цвета
+    txt = _emoji_bullets(txt)
+
+    # 3) заголовки с эмодзи
+    txt = _themed_headings(txt)
+
+    # 4) общий заголовок + «визитка»
+    mode_title = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}.get(mode, "Анализ")
+    head = f"<b>💄 Beauty Nano — {mode_title}</b>\n"
+    if profile:
+        bits = []
+        if profile.get("age"):  bits.append(f"{profile['age']} лет")
+        if profile.get("skin"): bits.append(profile["skin"])
+        if profile.get("hair"): bits.append(profile["hair"])
+        if bits:
+            head += f"<i>{html_escape(' / '.join(bits))}</i>\n"
+    head += "━━━━━━━━━━━━━━━━\n"
+
+    tail = "\n<i>Готово! Пришли новое фото или измени режим ниже.</i>"
+    return head + txt + tail
+
+def _split_chunks(s: str, limit: int = SAFE_CHUNK) -> list[str]:
+    s = s.strip()
+    parts: list[str] = []
+    while len(s) > limit:
+        cut = s.rfind("\n\n", 0, limit)
+        if cut == -1:
+            cut = s.rfind("\n", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(s[:cut].strip())
+        s = s[cut:].strip()
+    if s:
+        parts.append(s)
+    return parts
+
+async def send_html_long(chat, html_text: str, keyboard=None):
+    chunks = _split_chunks(html_text, SAFE_CHUNK)
+    if not chunks:
+        return
+    for part in chunks[:-1]:
+        try:
+            await chat.send_message(part, parse_mode="HTML")
+        except BadRequest:
+            await chat.send_message(re.sub(r"<[^>]+>", "", part))
+    last = chunks[-1]
+    try:
+        await chat.send_message(last, parse_mode="HTML", reply_markup=keyboard)
+    except BadRequest:
+        await chat.send_message(re.sub(r"<[^>]+>", "", last), reply_markup=keyboard)
+
+# ---------- ИСТОРИЯ ----------
 def _hist_user_dir(uid:int)->str:
     p=os.path.join(HISTORY_DIR,str(uid)); os.makedirs(p,exist_ok=True); return p
 def save_history(uid:int, mode:str, jpeg_bytes:bytes, text:str)->None:
     if not HISTORY_ENABLED: return
     try:
         ts=int(time.time()); udir=_hist_user_dir(uid)
-        with open(os.path.join(udir,f"{ts}.jpg"),"wb") as f: f.write(jpeg_bytes)
-        with open(os.path.join(udir,f"{ts}.txt"),"w",encoding="utf-8") as f: f.write(text)
+        img=os.path.join(udir,f"{ts}.jpg"); txt=os.path.join(udir,f"{ts}.txt")
+        with open(img,"wb") as f: f.write(jpeg_bytes)
+        with open(txt,"w",encoding="utf-8") as f: f.write(text)
         key=str(uid); items=HISTORY.get(key,[])
-        items.append({"ts":ts,"mode":mode,"img":os.path.join(udir,f"{ts}.jpg"),"txt":os.path.join(udir,f"{ts}.txt")})
+        items.append({"ts":ts,"mode":mode,"img":img,"txt":txt})
         items=sorted(items,key=lambda x:x["ts"],reverse=True)[:HISTORY_LIMIT]
         HISTORY[key]=items; persist_all()
     except Exception as e: log.warning("history save failed: %s", e)
@@ -250,12 +355,13 @@ def list_history(uid:int)->List[Dict[str,Any]]: return HISTORY.get(str(uid),[])
 def history_keyboard(uid:int)->InlineKeyboardMarkup:
     entries=list_history(uid)
     if not entries: return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад",callback_data="home")]])
-    rows=[];
+    rows=[]
     for e in entries[:10]:
         dt=datetime.fromtimestamp(e["ts"]).strftime("%d.%m %H:%M")
         rows.append([InlineKeyboardButton(f"{dt} • {MODES.get(e.get('mode','both'),'')}", callback_data=f"hist:{e['ts']}")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")]); return InlineKeyboardMarkup(rows)
 
+# ---------- КЛАВИАТУРЫ ----------
 def action_keyboard(for_user_id:int, user_data:dict|None=None)->InlineKeyboardMarkup:
     premium=usage_entry(for_user_id).get("premium",False)
     buttons=[
@@ -271,8 +377,10 @@ def action_keyboard(for_user_id:int, user_data:dict|None=None)->InlineKeyboardMa
     if for_user_id and is_admin(for_user_id): buttons.append([InlineKeyboardButton("🛠 Администратор",callback_data="admin")])
     return InlineKeyboardMarkup(buttons)
 
+# ---------- УТИЛИТА ДЛЯ БЛОКИРУЮЩИХ ----------
 async def run_blocking(func,*a,**kw): return await asyncio.to_thread(func,*a,**kw)
 
+# ---------- АНАЛИЗ ----------
 async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, user_id:int, username:str|None):
     ensure_user(user_id)
     if not check_usage(user_id):
@@ -299,8 +407,12 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
         response=await run_blocking(model.generate_content, payload)
         text=(getattr(response,"text","") or "").strip() or "Ответ пустой."
         text=remove_photo_tips(text)
-        if len(text)>1800: text=text[:1800]+"\n\n<i>Сокращено.</i>"
 
+        # стиль + длинные ответы без обрезки
+        styled = style_response(text, mode, profile=user_data.get("profile"))
+        await send_html_long(chat, styled, keyboard=action_keyboard(user_id, user_data))
+
+        # фон: история + sheets
         async def _save():
             try: await run_blocking(save_history, user_id, mode, jpeg_bytes, text)
             except Exception as e: log.warning("history async failed: %s", e)
@@ -310,13 +422,11 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
         asyncio.create_task(_save())
         if SHEETS_ENABLED and _sh: asyncio.create_task(_sheets())
 
-        try: await chat.send_message(text, parse_mode="HTML", reply_markup=action_keyboard(user_id, user_data))
-        except BadRequest:
-            safe=re.sub(r"<[^>]+>", "", text); await chat.send_message(safe, reply_markup=action_keyboard(user_id, user_data))
         await chat.send_message(get_usage_text(user_id))
     except Exception as e:
         log.exception("Gemini error"); await chat.send_message(f"Ошибка анализа: {e}")
 
+# ---------- ОБЩИЕ ХЭНДЛЕРЫ ----------
 async def send_home(chat, uid:int, user_data:dict):
     await chat.send_message("Привет! Пришли фото — дам рекомендации.", reply_markup=action_keyboard(uid, user_data))
     await chat.send_message(get_usage_text(uid))
@@ -335,6 +445,7 @@ async def on_photo(update:Update, context:ContextTypes.DEFAULT_TYPE):
     buf=io.BytesIO(); await file.download_to_memory(out=buf)
     await _process_image_bytes(update.effective_chat, buf.getvalue(), get_mode(context.user_data), context.user_data, uid, getattr(update.effective_user,"username",None))
 
+# ---------- КНОПКИ / АДМИНКА ----------
 ADMIN_STATE: Dict[int, Dict[str, Any]] = {}
 
 async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -481,24 +592,16 @@ async def on_admin_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
             u=usage_entry(target_id)
             txt=(f"ℹ️ Пользователь {target_id}\n• Премиум: {'да' if u.get('premium') else 'нет'}\n"
                  f"• Анализов (этот месяц): {u.get('count',0)} / лимит {CONFIG.get('FREE_LIMIT')}\n"
-                 f"• Месяц записи: {u.get('month')}\n• Известен боту: {'да' if target_id in USERS else 'нет'}\n"
+                 f"• Месяц записи: {u.get('month')}\n"
+                 f"• Известен боту: {'да' if target_id in USERS else 'нет'}\n"
                  f"• Админ: {'да' if target_id in ADMINS else 'нет'}")
             return await update.message.reply_text(txt)
 
-    if mode=="add_free":
-        text=(update.message.text or "").strip(); parts=text.split()
-        if len(parts)<2 or not parts[0].isdigit() or not parts[1].isdigit():
-            return await update.message.reply_text("Формат: user_id количество (пример: 123456 3)")
-        target_id=int(parts[0]); add_n=int(parts[1]); ensure_user(target_id)
-        u=usage_entry(target_id); u["count"]=max(0, u.get("count",0)-add_n); persist_all()
-        return await update.message.reply_text(f"✅ Добавил {add_n} анализов пользователю {target_id}. Использовано: {u['count']}.")
-
-# ---------- ПРОСТЫЕ АДМИН-КОМАНДЫ (напрямую) ----------
+# ---------- ПРОСТЫЕ АДМИН-КОМАНДЫ ----------
 async def cmd_whoami(update:Update, _):
     await update.message.reply_text(f"Твой user_id: <code>{update.effective_user.id}</code>", parse_mode="HTML")
 
 async def cmd_make_admin_seed(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    # Только те, кто в ADMIN_IDS (seed_admins) — «суперадмины»
     if update.effective_user.id not in seed_admins:
         return await update.message.reply_text("Недостаточно прав.")
     if not context.args or not context.args[0].isdigit():
@@ -547,6 +650,7 @@ async def on_diag(update:Update,_):
          f"• DATA_DIR: {os.path.abspath(DATA_DIR)}\n• Sheets: {'connected' if _sh else 'off'}")
     await update.message.reply_text(txt, parse_mode="HTML")
 
+# ---------- HEALTHZ ----------
 def start_flask_healthz(port:int):
     app=Flask(__name__)
     @app.get("/healthz")
@@ -554,6 +658,7 @@ def start_flask_healthz(port:int):
     th=Thread(target=lambda: app.run(host="0.0.0.0",port=port,debug=False,use_reloader=False))
     th.daemon=True; th.start(); log.info("Flask /healthz on %s", port)
 
+# ---------- MAIN ----------
 def main():
     app=Application.builder().token(BOT_TOKEN).build()
 
@@ -571,19 +676,16 @@ def main():
     )
     app.add_handler(profile_conv)
 
-    # обычные команды
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("ping", on_ping))
     app.add_handler(CommandHandler("diag", on_diag))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
     app.add_handler(CommandHandler("make_admin", cmd_make_admin_seed))
-    # простые админ-команды
     app.add_handler(CommandHandler("add_admin", cmd_add_admin))
     app.add_handler(CommandHandler("remove_admin", cmd_remove_admin))
     app.add_handler(CommandHandler("grant_premium", cmd_grant_premium))
     app.add_handler(CommandHandler("revoke_premium", cmd_revoke_premium))
 
-    # сообщения
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_admin_text))
