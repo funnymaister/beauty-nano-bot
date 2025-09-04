@@ -19,7 +19,7 @@ from telegram.ext import (
     ContextTypes, CallbackQueryHandler, ConversationHandler, filters
 )
 
-# === ДОБАВЛЕНО: Google Sheets справочники как «источник истины»
+# === Google Sheets: справочники как «источник истины»
 from refdata import REF
 
 # ---------- ЛОГИ ----------
@@ -158,7 +158,7 @@ def sheets_log_feedback(user_id: int, value: str):
 # ---------- СОСТОЯНИЯ, РЕЖИМЫ, ПРОФИЛЬ ----------
 LAST_ANALYSIS_AT: Dict[int, float] = {}
 
-MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо+Волосы"}
+MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}
 def get_mode(user_data: dict) -> str: return user_data.get("mode","both")
 def set_mode(user_data: dict, mode: str)->None:
     if mode in MODES: user_data["mode"] = mode
@@ -226,7 +226,13 @@ def get_usage_text(user_id:int)->str:
     return f"Осталось бесплатных анализов: {left} из {limit}."
 
 # ---------- ФИЛЬТР «не советовать переснимать» ----------
-PHOTO_TIPS_PATTERNS=[r"улучш(ить|ения?)\s+(качества|фото|изображения)",r"качество\s+(фото|изображения)",r"освещени[ея]",r"ракурс",r"(камера|объектив|смартфон|зеркалк)",r"сделай(те)?\s+фото",r"пересним(и|ите)",r"перефотографируй(те)?",r"фон.*(равномерн|однотонн)",r"резкост[ьи]",r"шум(ы)?\s+на\s+фото",r"неч[её]тк(о|ость)|размыто",r"увеличь(те)?\s+разрешение"]
+PHOTO_TIPS_PATTERNS=[
+    r"улучш(ить|ения?)\s+(качества|фото|изображения)", r"качество\s+(фото|изображения)",
+    r"освещени[ея]", r"ракурс", r"(камера|объектив|смартфон|зеркалк)",
+    r"сделай(те)?\s+фото", r"пересним(и|ите)", r"перефотографируй(те)?",
+    r"фон.*(равномерн|однотонн)", r"резкост[ьи]", r"шум(ы)?\s+на\s+фото",
+    r"неч[её]тк(о|ость)|размыто", r"увеличь(те)?\s+разрешение"
+]
 _photo_tips_rx=re.compile("|".join(PHOTO_TIPS_PATTERNS), re.IGNORECASE|re.UNICODE)
 def remove_photo_tips(text:str)->str:
     parts=re.split(r"\n{2,}", (text or "").strip()); kept=[]
@@ -250,6 +256,10 @@ def _emoji_bullets(text: str) -> str:
         if re.match(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", line):
             bullet = colors[i % len(colors)]; i += 1
             line = re.sub(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", bullet + " ", line)
+        # добавим лёгкие акценты
+        line = re.sub(r"\b(утро|утренний)\b", "☀️ утро", line, flags=re.I)
+        line = re.sub(r"\b(день|днём|дневной)\b", "🌤️ день", line, flags=re.I)
+        line = re.sub(r"\b(вечер|вечерний)\b", "🌙 вечер", line, flags=re.I)
         out_lines.append(line)
     return "\n".join(out_lines)
 
@@ -266,7 +276,6 @@ def _themed_headings(text: str) -> str:
             elif key.startswith("день"): emo = "🌤️"
             elif key.startswith("вечер"): emo = "🌙"
             elif key.startswith("ноч"): emo = "🌘"
-            elif key.startswith("ночной"): emo = "🌘"
             elif key == "sos": emo = "🚑"
             elif key.startswith("советы") or key.startswith("рекомендац"): emo = "🎯"
             title = key.capitalize()
@@ -330,15 +339,21 @@ def save_history(uid:int, mode:str, jpeg_bytes:bytes, text:str)->None:
         items=sorted(items,key=lambda x:x["ts"],reverse=True)[:HISTORY_LIMIT]
         HISTORY[key]=items; persist_all()
     except Exception as e: log.warning("history save failed: %s", e)
+
 def list_history(uid:int)->List[Dict[str,Any]]: return HISTORY.get(str(uid),[])
+
 def history_keyboard(uid:int)->InlineKeyboardMarkup:
     entries=list_history(uid)
-    if not entries: return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад",callback_data="home")]])
+    if not entries:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад",callback_data="home")]])
     rows=[]
     for e in entries[:10]:
         dt=datetime.fromtimestamp(e["ts"]).strftime("%d.%m %H:%M")
-        rows.append([InlineKeyboardButton(f"{dt} • {MODES.get(e.get('mode','both'),'')}", callback_data=f"hist:{e['ts']}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")]); return InlineKeyboardMarkup(rows)
+        emoji = "📸"
+        mode = MODES.get(e.get("mode","both"),"")
+        rows.append([InlineKeyboardButton(f"{emoji} {dt} • {mode}", callback_data=f"hist:{e['ts']}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
 
 # ---------- КЛАВИАТУРЫ ----------
 def action_keyboard(for_user_id:int, user_data:dict|None=None)->InlineKeyboardMarkup:
@@ -352,7 +367,7 @@ def action_keyboard(for_user_id:int, user_data:dict|None=None)->InlineKeyboardMa
         [InlineKeyboardButton("ℹ️ Лимиты",callback_data="limits")]
     ]
     if not premium: buttons.append([InlineKeyboardButton("🌟 Премиум",callback_data="premium")])
-    else: buttons.append([InlineKeyboardButton("💳 Купить снова (продлить)",callback_data="renew")])
+    else: buttons.append([InlineKeyboardButton("💳 Продлить премиум",callback_data="renew")])
     if for_user_id and is_admin(for_user_id): buttons.append([InlineKeyboardButton("🛠 Администратор",callback_data="admin")])
     return InlineKeyboardMarkup(buttons)
 
@@ -379,7 +394,8 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
     payload=[
         ("Ты бьюти-ассистент. Проанализируй фото в контексте режима: "
          f"{mode}. Дай чёткие практичные рекомендации по уходу/стайлингу. "
-         "Никаких советов про качество фото/освещение/ракурс — только уход и продукты."),
+         "Никаких советов про качество фото/освещение/ракурс — только уход и продукты. "
+         "Отдельно отметь блоки '☀️ утро', '🌤️ день', '🌙 вечер'."),
         {"inline_data":{"mime_type":"image/jpeg","data":b64}}
     ]
     try:
@@ -412,7 +428,7 @@ async def on_start(update:Update, context:ContextTypes.DEFAULT_TYPE):
     uid=update.effective_user.id; ensure_user(uid)
     sheets_log_user(uid, getattr(update.effective_user,"username",None))
     await send_home(update.effective_chat, uid, context.user_data)
-    # ДОБАВЛЕНО: приветствие из листа messages
+    # Приветствие из листа messages
     try:
         title = REF.msg("welcome_title", "ru", default="Добро пожаловать в Beauty Nano Bot 💄")
         await update.message.reply_text(title)
@@ -431,11 +447,33 @@ async def on_photo(update:Update, context:ContextTypes.DEFAULT_TYPE):
 # ---------- КНОПКИ / АДМИНКА ----------
 ADMIN_STATE: Dict[int, Dict[str, Any]] = {}
 
+def admin_user_card_kb(target_id:int)->InlineKeyboardMarkup:
+    isadm = target_id in ADMINS
+    isprem = usage_entry(target_id).get("premium", False)
+    rows = [
+        [InlineKeyboardButton(("👑 Снять админа" if isadm else "👑 Назначить админом"), callback_data=f"admin:act:{'rem_admin' if isadm else 'add_admin'}:{target_id}")],
+        [InlineKeyboardButton(("🚫 Снять премиум" if isprem else "🌟 Выдать премиум"), callback_data=f"admin:act:{'revoke_premium' if isprem else 'grant_premium'}:{target_id}")],
+        [InlineKeyboardButton("⬅️ Назад к списку", callback_data="admin:pick_users")]
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def admin_pick_users_kb()->InlineKeyboardMarkup:
+    # последние 12 известных пользователей
+    last_ids = sorted(list(USERS))[-12:]
+    rows=[]
+    for uid in reversed(last_ids):
+        flag = ("👑" if uid in ADMINS else "👤")
+        star = ("🌟" if usage_entry(uid).get("premium") else "🆓")
+        rows.append([InlineKeyboardButton(f"{flag}{star} {uid}", callback_data=f"admin:user:{uid}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад",callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
+
 async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query; data=(q.data or "").strip()
     uid=update.effective_user.id; ensure_user(uid)
 
     if data=="home": await q.answer(); return await send_home(update.effective_chat, uid, context.user_data)
+
     if data=="mode_menu":
         await q.answer(); cur=get_mode(context.user_data)
         return await q.message.reply_text(f"Текущий режим: {MODES[cur]}\nВыбери:", reply_markup=mode_keyboard(cur))
@@ -446,22 +484,43 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if data=="history":
         await q.answer(); items=list_history(uid)
         if not items:
-            return await q.message.reply_text("История пуста.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад",callback_data="home")]]))
-        return await q.message.reply_text("Твоя история:", reply_markup=history_keyboard(uid))
-    if data.startswith("hist:"):
-        await q.answer(); ts=data.split(":",1)[1]
-        rec=next((r for r in list_history(uid) if str(r["ts"])==ts), None)
-        if not rec: return await q.message.reply_text("Запись не найдена.", reply_markup=history_keyboard(uid))
-        try:
-            with open(rec["txt"],"r",encoding="utf-8") as f: txt=f.read()
-        except Exception: txt="(не удалось прочитать текст)"
-        cap=txt[:1024] if txt else f"Режим: {MODES.get(rec.get('mode','both'),'')}"
-        try:
-            with open(rec["img"],"rb") as ph: await q.message.reply_photo(photo=ph, caption=cap)
-        except Exception: await q.message.reply_text(cap)
-        return await q.message.reply_text("Выбери запись:", reply_markup=history_keyboard(uid))
+            return await q.message.reply_text("🗂 История пуста.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад",callback_data="home")]]))
+        return await q.message.reply_text("🗂 Выбери запись:", reply_markup=history_keyboard(uid))
 
-    # ⚠️ ЗАМЕНЕНО: блок "limits" — теперь берёт значения из Google Sheets
+    # — улучшенный просмотр записи истории
+    if data.startswith("hist:"):
+        await q.answer()
+        ts = data.split(":",1)[1]
+        rec = next((r for r in list_history(uid) if str(r["ts"])==ts), None)
+        if not rec:
+            return await q.message.reply_text("❌ Запись не найдена.", reply_markup=history_keyboard(uid))
+
+        # читаем полный текст
+        try:
+            with open(rec["txt"], "r", encoding="utf-8") as f:
+                txt = f.read()
+        except Exception:
+            txt = "(⚠️ не удалось прочитать текст)"
+
+        # заголовок с датой и режимом
+        dt = datetime.fromtimestamp(rec["ts"]).strftime("%d.%m.%Y %H:%M")
+        mode = MODES.get(rec.get("mode", "both"), "Анализ")
+        head = f"🗓 {dt}\n🧾 Режим: {mode}\n\n"
+
+        # фото (если есть)
+        try:
+            with open(rec["img"], "rb") as ph:
+                await q.message.reply_photo(photo=ph, caption=f"{head}📋 Полный результат ниже ⬇️")
+        except Exception:
+            await q.message.reply_text(f"{head}📋 Полный результат ниже ⬇️")
+
+        # полный текст (разбиваем по кускам)
+        for chunk in _split_chunks(txt, SAFE_CHUNK):
+            await q.message.reply_text(chunk)
+
+        return await q.message.reply_text("🗂 Выбери запись:", reply_markup=history_keyboard(uid))
+
+    # — лимиты/цены из Sheets
     if data=="limits":
         await q.answer()
         daily_free = REF.get_limit("daily_free", CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT))
@@ -473,9 +532,9 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                f"— Цена Premium: {price_rub} ₽/мес")
         return await q.message.reply_text(txt, parse_mode="Markdown")
 
+    # — премиум покупка/продление
     if data=="premium":
         await q.answer()
-        # можно также брать цену из REF, но оставим твоё поведение на кнопку «Премиум»
         price=int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
         return await q.message.reply_text(
             f"🌟 <b>Премиум</b>\nБезлимит анализов\nЦена: {price} ₽ / месяц",
@@ -491,23 +550,57 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if data=="fb:up": FEEDBACK["up"]=FEEDBACK.get("up",0)+1; persist_all(); sheets_log_feedback(uid,"up"); return await q.answer("Спасибо!")
     if data=="fb:down": FEEDBACK["down"]=FEEDBACK.get("down",0)+1; persist_all(); sheets_log_feedback(uid,"down"); return await q.answer("Принято")
 
+    # — АДМИНКА
     if data=="admin":
         if not is_admin(uid): return await q.answer("Недостаточно прав", show_alert=True)
         await q.answer(); return await q.message.reply_text("🛠 Админ-панель", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("👥 Пользователи",callback_data="admin:users"),
+            [InlineKeyboardButton("👥 Пользователи",callback_data="admin:pick_users"),
              InlineKeyboardButton("📊 Статистика",callback_data="admin:stats")],
             [InlineKeyboardButton("🎁 Бонусы",callback_data="admin:bonus"),
              InlineKeyboardButton("⚙️ Настройки",callback_data="admin:settings")],
             [InlineKeyboardButton("📣 Рассылка",callback_data="admin:broadcast")],
-            # ДОБАВЛЕНО: кнопка обновления справочников
             [InlineKeyboardButton("🔄 Обновить справочники",callback_data="admin:reload_refs")],
             [InlineKeyboardButton("⬅️ Назад",callback_data="home")]
         ]))
 
     if data.startswith("admin:"):
         if not is_admin(uid): return await q.answer("Недостаточно прав", show_alert=True)
-        await q.answer(); cmd=data.split(":",1)[1]
-        # ДОБАВЛЕНО: обработчик обновления справочников
+        await q.answer(); parts=data.split(":")
+        cmd = parts[1]
+
+        # выбор пользователя из списка
+        if cmd=="pick_users":
+            return await q.message.reply_text("👥 Недавние пользователи:", reply_markup=admin_pick_users_kb())
+
+        # карточка пользователя
+        if cmd=="user" and len(parts)>=3 and parts[2].isdigit():
+            target = int(parts[2])
+            ensure_user(target)
+            u=usage_entry(target)
+            txt=(f"ℹ️ Пользователь {target}\n• 👑 Админ: {'да' if target in ADMINS else 'нет'}\n"
+                 f"• 🌟 Премиум: {'да' if u.get('premium') else 'нет'}\n"
+                 f"• Анализов (этот месяц): {u.get('count',0)} / лимит {CONFIG.get('FREE_LIMIT')}")
+            return await q.message.reply_text(txt, reply_markup=admin_user_card_kb(target))
+
+        # действия над пользователем через кнопки
+        if cmd=="act" and len(parts)>=4:
+            action = parts[2]
+            try: target = int(parts[3])
+            except: return await q.message.reply_text("Некорректный user_id.")
+            ensure_user(target)
+            if action=="add_admin":
+                ADMINS.add(target); persist_all()
+                return await q.message.reply_text(f"✅ {target} назначен админом.", reply_markup=admin_user_card_kb(target))
+            if action=="rem_admin":
+                if target in ADMINS: ADMINS.remove(target); persist_all()
+                return await q.message.reply_text(f"✅ {target} снят с админов.", reply_markup=admin_user_card_kb(target))
+            if action=="grant_premium":
+                u=usage_entry(target); u["premium"]=True; persist_all()
+                return await q.message.reply_text(f"✅ Премиум выдан {target}.", reply_markup=admin_user_card_kb(target))
+            if action=="revoke_premium":
+                u=usage_entry(target); u["premium"]=False; persist_all()
+                return await q.message.reply_text(f"✅ Премиум снят у {target}.", reply_markup=admin_user_card_kb(target))
+
         if cmd=="reload_refs":
             try:
                 REF.reload_all()
@@ -515,17 +608,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 return await q.message.reply_text(f"⚠️ Не удалось обновить справочники: {e}")
 
-        if cmd=="users":
-            kb=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➕ Назначить админа",callback_data="admin:add_admin"),
-                 InlineKeyboardButton("➖ Снять админа",callback_data="admin:rem_admin")],
-                [InlineKeyboardButton("🌟 Выдать премиум",callback_data="admin:grant_premium"),
-                 InlineKeyboardButton("🚫 Снять премиум",callback_data="admin:revoke_premium")],
-                [InlineKeyboardButton("➕ Добавить анализы",callback_data="admin:add_free")],
-                [InlineKeyboardButton("ℹ️ Инфо по user_id",callback_data="admin:user_info")],
-                [InlineKeyboardButton("⬅️ Назад",callback_data="admin")]
-            ])
-            return await q.message.reply_text("👥 Управление пользователями", reply_markup=kb)
         if cmd=="stats":
             total=len(USERS); premium=sum(1 for u in USAGE.values() if u.get("premium"))
             month=datetime.utcnow().month
@@ -535,35 +617,30 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                  f"• Анализов (этот месяц): {total_analyses}\n• Фидбек 👍/👎: {fb_up}/{fb_down}\n"
                  f"• FREE_LIMIT: {CONFIG.get('FREE_LIMIT')} • PRICE: {CONFIG.get('PRICE_RUB')} ₽")
             return await q.message.reply_text(txt)
+
         if cmd=="bonus":
-            kb=InlineKeyboardMarkup([[InlineKeyboardButton("🌟 Выдать премиум",callback_data="admin:grant_premium")],
-                                     [InlineKeyboardButton("➕ Добавить анализы",callback_data="admin:add_free")],
+            kb=InlineKeyboardMarkup([[InlineKeyboardButton("🌟 Выдать премиум",callback_data="admin:pick_users")],
                                      [InlineKeyboardButton("⬅️ Назад",callback_data="admin")]])
             return await q.message.reply_text("🎁 Бонусы/Подарки", reply_markup=kb)
+
         if cmd=="settings":
             kb=InlineKeyboardMarkup([[InlineKeyboardButton("🧮 Изменить лимит FREE",callback_data="admin:set_limit")],
                                      [InlineKeyboardButton("💵 Изменить цену",callback_data="admin:set_price")],
                                      [InlineKeyboardButton("⬅️ Назад",callback_data="admin")]])
             return await q.message.reply_text("⚙️ Настройки", reply_markup=kb)
-        if cmd=="broadcast": ADMIN_STATE[uid]={"mode":"broadcast"}; return await q.message.reply_text("Введи текст рассылки.")
-        if cmd in ("add_admin","rem_admin","grant_premium","revoke_premium","add_free","user_info"):
-            ADMIN_STATE[uid]={"mode":cmd}
-            prompts={
-                "add_admin":"Отправь user_id нового администратора (или перешли его сообщение).",
-                "rem_admin":"Отправь user_id администратора для снятия.",
-                "grant_premium":"Отправь user_id, кому выдать Премиум.",
-                "revoke_premium":"Отправь user_id, у кого снять Премиум.",
-                "add_free":"Формат: user_id пробел количество (пример: 123456 3).",
-                "user_info":"Отправь user_id пользователя.",
-            }
-            return await q.message.reply_text(prompts[cmd])
-        if cmd=="set_limit":
-            ADMIN_STATE[uid]={"mode":"set_limit"}
-            return await q.message.reply_text(f"FREE_LIMIT={CONFIG.get('FREE_LIMIT')}. Введи новое целое число.")
-        if cmd=="set_price":
-            ADMIN_STATE[uid]={"mode":"set_price"}
-            return await q.message.reply_text(f"Цена={CONFIG.get('PRICE_RUB')} ₽. Введи новую цену (целое).")
 
+        if cmd=="broadcast":
+            ADMIN_STATE[uid]={"mode":"broadcast"}
+            return await q.message.reply_text("Введи текст рассылки.")
+
+        if cmd in ("set_limit","set_price"):
+            ADMIN_STATE[uid]={"mode":cmd}
+            if cmd=="set_limit":
+                return await q.message.reply_text(f"FREE_LIMIT={CONFIG.get('FREE_LIMIT')}. Введи новое целое число.")
+            else:
+                return await q.message.reply_text(f"Цена={CONFIG.get('PRICE_RUB')} ₽. Введи новую цену (целое).")
+
+# — текстовый ввод для админских настроек и рассылки (оставили как было)
 def extract_user_id_from_message(update:Update)->int|None:
     if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
         return update.message.reply_to_message.from_user.id
@@ -588,34 +665,6 @@ async def on_admin_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
             except (Forbidden, Exception): failed+=1
         ADMIN_STATE.pop(admin_id, None); return await update.message.reply_text(f"Готово. Успешно: {sent}, ошибок: {failed}.")
 
-    if mode in ("add_admin","rem_admin","grant_premium","revoke_premium","user_info"):
-        target_id=extract_user_id_from_message(update)
-        if not target_id: return await update.message.reply_text("Не смог распознать user_id.")
-        ensure_user(target_id)
-        if mode=="add_admin": ADMINS.add(target_id); persist_all(); return await update.message.reply_text(f"✅ {target_id} назначен админом.")
-        if mode=="rem_admin":
-            if target_id in ADMINS: ADMINS.remove(target_id); persist_all(); return await update.message.reply_text(f"✅ {target_id} снят с админов.")
-            return await update.message.reply_text("Этот пользователь не админ.")
-        if mode=="grant_premium": u=usage_entry(target_id); u["premium"]=True; persist_all(); return await update.message.reply_text(f"✅ Премиум выдан {target_id}.")
-        if mode=="revoke_premium": u=usage_entry(target_id); u["premium"]=False; persist_all(); return await update.message.reply_text(f"✅ Премиум снят у {target_id}.")
-        if mode=="user_info":
-            u=usage_entry(target_id)
-            txt=(f"ℹ️ Пользователь {target_id}\n• Премиум: {'да' if u.get('premium') else 'нет'}\n"
-                 f"• Анализов (этот месяц): {u.get('count',0)} / лимит {CONFIG.get('FREE_LIMIT')}\n"
-                 f"• Месяц записи: {u.get('month')}\n"
-                 f"• Известен боту: {'да' if target_id in USERS else 'нет'}\n"
-                 f"• Админ: {'да' if target_id in ADMINS else 'нет'}")
-            return await update.message.reply_text(txt)
-
-    if mode=="add_free":
-        text=(update.message.text or "").strip(); parts=text.split()
-        if len(parts)<2 or not parts[0].isdigit() or not parts[1].isdigit():
-            return await update.message.reply_text("Формат: user_id количество (пример: 123456 3)")
-        target_id=int(parts[0]); add_n=int(parts[1]); ensure_user(target_id)
-        u=usage_entry(target_id); u["count"]=max(0, u.get("count",0) - add_n); persist_all()
-        return await update.message.reply_text(f"✅ Добавил {add_n} анализов пользователю {target_id}. Использовано: {u['count']}.")
-
-    # >>>>>>> У ТЕБЯ ЭТО УЖЕ БЫЛО: обработка set_limit / set_price
     if mode=="set_limit":
         txt=(update.message.text or "").strip()
         if not txt.isdigit():
@@ -643,30 +692,6 @@ async def cmd_make_admin_seed(update:Update, context:ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Использование: /make_admin <user_id>")
     target=int(context.args[0]); ADMINS.add(target); persist_all()
     await update.message.reply_text(f"✅ Пользователь {target} назначен админом.")
-
-async def cmd_add_admin(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return await update.message.reply_text("Недостаточно прав.")
-    if not context.args or not context.args[0].isdigit(): return await update.message.reply_text("Использование: /add_admin <user_id>")
-    target=int(context.args[0]); ADMINS.add(target); persist_all(); await update.message.reply_text(f"✅ {target} теперь админ.")
-
-async def cmd_remove_admin(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return await update.message.reply_text("Недостаточно прав.")
-    if not context.args or not context.args[0].isdigit(): return await update.message.reply_text("Использование: /remove_admin <user_id>")
-    target=int(context.args[0])
-    if target in ADMINS: ADMINS.remove(target); persist_all(); return await update.message.reply_text(f"✅ {target} снят с админов.")
-    return await update.message.reply_text("Этот пользователь не админ.")
-
-async def cmd_grant_premium(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return await update.message.reply_text("Недостаточно прав.")
-    if not context.args or not context.args[0].isdigit(): return await update.message.reply_text("Использование: /grant_premium <user_id>")
-    target=int(context.args[0]); ensure_user(target)
-    u=usage_entry(target); u["premium"]=True; persist_all(); await update.message.reply_text(f"✅ Премиум выдан {target}.")
-
-async def cmd_revoke_premium(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id): return await update.message.reply_text("Недостаточно прав.")
-    if not context.args or not context.args[0].isdigit(): return await update.message.reply_text("Использование: /revoke_premium <user_id>")
-    target=int(context.args[0]); ensure_user(target)
-    u=usage_entry(target); u["premium"]=False; persist_all(); await update.message.reply_text(f"✅ Премиум снят у {target}.")
 
 async def on_ping(update:Update,_): await update.message.reply_text("pong")
 
@@ -716,10 +741,6 @@ def main():
     app.add_handler(CommandHandler("diag", on_diag))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
     app.add_handler(CommandHandler("make_admin", cmd_make_admin_seed))
-    app.add_handler(CommandHandler("add_admin", cmd_add_admin))
-    app.add_handler(CommandHandler("remove_admin", cmd_remove_admin))
-    app.add_handler(CommandHandler("grant_premium", cmd_grant_premium))
-    app.add_handler(CommandHandler("revoke_premium", cmd_revoke_premium))
 
     app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(CallbackQueryHandler(on_callback))
@@ -727,7 +748,7 @@ def main():
 
     start_flask_healthz(PORT)
     sheets_init()
-    # ДОБАВЛЕНО: первичная загрузка справочников из Google Sheets
+    # первичная загрузка справочников из Google Sheets
     try:
         REF.reload_all()
     except Exception as e:
@@ -736,4 +757,14 @@ def main():
     app.run_polling()
 
 if __name__=="__main__":
-    main()
+    try:
+        log.info("Boot… ENV: BOT_TOKEN=%s, GEMINI_API_KEY=%s, SHEETS_ID=%s",
+                 "SET" if os.getenv("BOT_TOKEN") else "MISSING",
+                 "SET" if os.getenv("GEMINI_API_KEY") else "MISSING",
+                 os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", "-"))
+        main()
+    except Exception as e:
+        import traceback, sys
+        traceback.print_exc()
+        log.error("Fatal on boot: %s", e)
+        sys.exit(1)
