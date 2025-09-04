@@ -155,6 +155,34 @@ def sheets_log_feedback(user_id: int, value: str):
         _sh.worksheet("feedback").append_row([int(time.time()), user_id, value], value_input_option="USER_ENTERED")
     except Exception as e: log.warning("sheets_log_feedback failed: %s", e)
 
+# NEW: тянуть историю из Sheets (analyses)
+def sheets_fetch_history(user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+    """
+    Возвращает последние записи анализа для пользователя из листа 'analyses'.
+    Структура: {"ts": int, "mode": "face|hair|both", "img": None, "txt_inline": str}
+    """
+    if not _sh: return []
+    try:
+        ws = _sh.worksheet("analyses")
+        rows = ws.get_all_records(numericise_ignore=["all"])
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                if int(str(r.get("user_id","-1")).strip()) != int(user_id):
+                    continue
+                ts_raw = str(r.get("ts","")).strip()
+                ts = int(ts_raw) if ts_raw.isdigit() else int(time.time())
+                mode = (str(r.get("mode","both")) or "both").strip().lower()
+                text = (r.get("text") or "").strip()
+                out.append({"ts": ts, "mode": mode, "img": None, "txt_inline": text})
+            except Exception:
+                continue
+        out.sort(key=lambda x: x["ts"], reverse=True)
+        return out[:limit]
+    except Exception as e:
+        log.warning("sheets_fetch_history failed: %s", e)
+        return []
+
 # ---------- СОСТОЯНИЯ, РЕЖИМЫ, ПРОФИЛЬ ----------
 LAST_ANALYSIS_AT: Dict[int, float] = {}
 
@@ -256,7 +284,6 @@ def _emoji_bullets(text: str) -> str:
         if re.match(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", line):
             bullet = colors[i % len(colors)]; i += 1
             line = re.sub(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", bullet + " ", line)
-        # добавим лёгкие акценты
         line = re.sub(r"\b(утро|утренний)\b", "☀️ утро", line, flags=re.I)
         line = re.sub(r"\b(день|днём|дневной)\b", "🌤️ день", line, flags=re.I)
         line = re.sub(r"\b(вечер|вечерний)\b", "🌙 вечер", line, flags=re.I)
@@ -340,7 +367,30 @@ def save_history(uid:int, mode:str, jpeg_bytes:bytes, text:str)->None:
         HISTORY[key]=items; persist_all()
     except Exception as e: log.warning("history save failed: %s", e)
 
-def list_history(uid:int)->List[Dict[str,Any]]: return HISTORY.get(str(uid),[])
+# NEW: смешанный источник истории (локально + Sheets)
+def list_history(uid:int)->List[Dict[str,Any]]:
+    """
+    Смешанный источник:
+      - локальные файлы (/data/history)
+      - Google Sheets 'analyses' (если доступно)
+    Дедуп по ts, сортировка по убыванию.
+    """
+    local = HISTORY.get(str(uid), [])
+    remote = sheets_fetch_history(uid, limit=20) if _sh else []
+
+    norm: List[Dict[str, Any]] = []
+    for e in local:
+        norm.append({"ts": int(e["ts"]), "mode": e.get("mode","both"), "img": e.get("img"),
+                     "txt": e.get("txt"), "txt_inline": None})
+    for e in remote:
+        norm.append({"ts": int(e["ts"]), "mode": e.get("mode","both"), "img": None,
+                     "txt": None, "txt_inline": e.get("txt_inline","")})
+
+    uniq: Dict[int, Dict[str,Any]] = {}
+    for e in norm:
+        uniq.setdefault(e["ts"], e)  # первым кладём локальный (если был), удалённый перезапишется только если локального нет
+    items = sorted(uniq.values(), key=lambda x: x["ts"], reverse=True)
+    return items[:HISTORY_LIMIT]
 
 def history_keyboard(uid:int)->InlineKeyboardMarkup:
     entries=list_history(uid)
@@ -487,7 +537,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text("🗂 История пуста.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад",callback_data="home")]]))
         return await q.message.reply_text("🗂 Выбери запись:", reply_markup=history_keyboard(uid))
 
-    # — улучшенный просмотр записи истории
     if data.startswith("hist:"):
         await q.answer()
         ts = data.split(":",1)[1]
@@ -495,32 +544,34 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         if not rec:
             return await q.message.reply_text("❌ Запись не найдена.", reply_markup=history_keyboard(uid))
 
-        # читаем полный текст
-        try:
-            with open(rec["txt"], "r", encoding="utf-8") as f:
-                txt = f.read()
-        except Exception:
-            txt = "(⚠️ не удалось прочитать текст)"
+        # читаем полный текст: приоритет — то, что пришло из Sheets
+        if rec.get("txt_inline"):
+            txt = rec["txt_inline"]
+        else:
+            try:
+                with open(rec["txt"], "r", encoding="utf-8") as f:
+                    txt = f.read()
+            except Exception:
+                txt = "(⚠️ не удалось прочитать текст)"
 
-        # заголовок с датой и режимом
         dt = datetime.fromtimestamp(rec["ts"]).strftime("%d.%m.%Y %H:%M")
         mode = MODES.get(rec.get("mode", "both"), "Анализ")
         head = f"🗓 {dt}\n🧾 Режим: {mode}\n\n"
 
-        # фото (если есть)
         try:
-            with open(rec["img"], "rb") as ph:
-                await q.message.reply_photo(photo=ph, caption=f"{head}📋 Полный результат ниже ⬇️")
+            if rec.get("img"):
+                with open(rec["img"], "rb") as ph:
+                    await q.message.reply_photo(photo=ph, caption=f"{head}📋 Полный результат ниже ⬇️")
+            else:
+                await q.message.reply_text(f"{head}📋 Полный результат ниже ⬇️")
         except Exception:
             await q.message.reply_text(f"{head}📋 Полный результат ниже ⬇️")
 
-        # полный текст (разбиваем по кускам)
         for chunk in _split_chunks(txt, SAFE_CHUNK):
             await q.message.reply_text(chunk)
 
         return await q.message.reply_text("🗂 Выбери запись:", reply_markup=history_keyboard(uid))
 
-    # — лимиты/цены из Sheets
     if data=="limits":
         await q.answer()
         daily_free = REF.get_limit("daily_free", CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT))
@@ -532,7 +583,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                f"— Цена Premium: {price_rub} ₽/мес")
         return await q.message.reply_text(txt, parse_mode="Markdown")
 
-    # — премиум покупка/продление
     if data=="premium":
         await q.answer()
         price=int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
@@ -550,7 +600,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if data=="fb:up": FEEDBACK["up"]=FEEDBACK.get("up",0)+1; persist_all(); sheets_log_feedback(uid,"up"); return await q.answer("Спасибо!")
     if data=="fb:down": FEEDBACK["down"]=FEEDBACK.get("down",0)+1; persist_all(); sheets_log_feedback(uid,"down"); return await q.answer("Принято")
 
-    # — АДМИНКА
     if data=="admin":
         if not is_admin(uid): return await q.answer("Недостаточно прав", show_alert=True)
         await q.answer(); return await q.message.reply_text("🛠 Админ-панель", reply_markup=InlineKeyboardMarkup([
@@ -568,11 +617,9 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await q.answer(); parts=data.split(":")
         cmd = parts[1]
 
-        # выбор пользователя из списка
         if cmd=="pick_users":
             return await q.message.reply_text("👥 Недавние пользователи:", reply_markup=admin_pick_users_kb())
 
-        # карточка пользователя
         if cmd=="user" and len(parts)>=3 and parts[2].isdigit():
             target = int(parts[2])
             ensure_user(target)
@@ -582,7 +629,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                  f"• Анализов (этот месяц): {u.get('count',0)} / лимит {CONFIG.get('FREE_LIMIT')}")
             return await q.message.reply_text(txt, reply_markup=admin_user_card_kb(target))
 
-        # действия над пользователем через кнопки
         if cmd=="act" and len(parts)>=4:
             action = parts[2]
             try: target = int(parts[3])
@@ -640,7 +686,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             else:
                 return await q.message.reply_text(f"Цена={CONFIG.get('PRICE_RUB')} ₽. Введи новую цену (целое).")
 
-# — текстовый ввод для админских настроек и рассылки (оставили как было)
 def extract_user_id_from_message(update:Update)->int|None:
     if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
         return update.message.reply_to_message.from_user.id
@@ -748,7 +793,6 @@ def main():
 
     start_flask_healthz(PORT)
     sheets_init()
-    # первичная загрузка справочников из Google Sheets
     try:
         REF.reload_all()
     except Exception as e:
