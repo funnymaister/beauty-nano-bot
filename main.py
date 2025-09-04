@@ -240,23 +240,17 @@ def html_escape(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def _emoji_bullets(text: str) -> str:
-    """Меняем дефисы/звёздочки/точки на цветные буллеты."""
     colors = ["🟢", "🟡", "🔵", "🟣", "🟠"]
     i = 0
     out_lines = []
     for line in text.splitlines():
         if re.match(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", line):
-            bullet = colors[i % len(colors)]
-            i += 1
+            bullet = colors[i % len(colors)]; i += 1
             line = re.sub(r"^\s*(?:[•\-\*\u2022]|[0-9]+\.)\s+", bullet + " ", line)
         out_lines.append(line)
     return "\n".join(out_lines)
 
 def _themed_headings(text: str) -> str:
-    """
-    Выделяем строки-заголовки и подставляем эмодзи:
-    Утро/День/Вечер/Ночь/Ночной/Рекомендации/Советы/SOS
-    """
     lines = text.splitlines()
     themed = []
     for ln in lines:
@@ -274,24 +268,16 @@ def _themed_headings(text: str) -> str:
             elif key.startswith("советы") or key.startswith("рекомендац"): emo = "🎯"
             title = key.capitalize()
             ln = f"<b>{emo} {html_escape(title)}</b>"
-            if rest:
-                ln += f"\n{html_escape(rest)}"
+            if rest: ln += f"\n{html_escape(rest)}"
             themed.append(ln)
         else:
             themed.append(html_escape(ln))
     return "\n".join(themed)
 
 def style_response(raw_text: str, mode: str, profile: dict | None = None) -> str:
-    # 1) нормализуем переносы
     txt = raw_text.strip().replace("\r\n", "\n").replace("\r", "\n")
-
-    # 2) буллеты цвета
     txt = _emoji_bullets(txt)
-
-    # 3) заголовки с эмодзи
     txt = _themed_headings(txt)
-
-    # 4) общий заголовок + «визитка»
     mode_title = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}.get(mode, "Анализ")
     head = f"<b>💄 Beauty Nano — {mode_title}</b>\n"
     if profile:
@@ -299,10 +285,8 @@ def style_response(raw_text: str, mode: str, profile: dict | None = None) -> str
         if profile.get("age"):  bits.append(f"{profile['age']} лет")
         if profile.get("skin"): bits.append(profile["skin"])
         if profile.get("hair"): bits.append(profile["hair"])
-        if bits:
-            head += f"<i>{html_escape(' / '.join(bits))}</i>\n"
+        if bits: head += f"<i>{html_escape(' / '.join(bits))}</i>\n"
     head += "━━━━━━━━━━━━━━━━\n"
-
     tail = "\n<i>Готово! Пришли новое фото или измени режим ниже.</i>"
     return head + txt + tail
 
@@ -311,30 +295,22 @@ def _split_chunks(s: str, limit: int = SAFE_CHUNK) -> list[str]:
     parts: list[str] = []
     while len(s) > limit:
         cut = s.rfind("\n\n", 0, limit)
-        if cut == -1:
-            cut = s.rfind("\n", 0, limit)
-        if cut == -1:
-            cut = limit
+        if cut == -1: cut = s.rfind("\n", 0, limit)
+        if cut == -1: cut = limit
         parts.append(s[:cut].strip())
         s = s[cut:].strip()
-    if s:
-        parts.append(s)
+    if s: parts.append(s)
     return parts
 
 async def send_html_long(chat, html_text: str, keyboard=None):
     chunks = _split_chunks(html_text, SAFE_CHUNK)
-    if not chunks:
-        return
+    if not chunks: return
     for part in chunks[:-1]:
-        try:
-            await chat.send_message(part, parse_mode="HTML")
-        except BadRequest:
-            await chat.send_message(re.sub(r"<[^>]+>", "", part))
+        try: await chat.send_message(part, parse_mode="HTML")
+        except BadRequest: await chat.send_message(re.sub(r"<[^>]+>", "", part))
     last = chunks[-1]
-    try:
-        await chat.send_message(last, parse_mode="HTML", reply_markup=keyboard)
-    except BadRequest:
-        await chat.send_message(re.sub(r"<[^>]+>", "", last), reply_markup=keyboard)
+    try: await chat.send_message(last, parse_mode="HTML", reply_markup=keyboard)
+    except BadRequest: await chat.send_message(re.sub(r"<[^>]+>", "", last), reply_markup=keyboard)
 
 # ---------- ИСТОРИЯ ----------
 def _hist_user_dir(uid:int)->str:
@@ -408,11 +384,9 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
         text=(getattr(response,"text","") or "").strip() or "Ответ пустой."
         text=remove_photo_tips(text)
 
-        # стиль + длинные ответы без обрезки
         styled = style_response(text, mode, profile=user_data.get("profile"))
         await send_html_long(chat, styled, keyboard=action_keyboard(user_id, user_data))
 
-        # фон: история + sheets
         async def _save():
             try: await run_blocking(save_history, user_id, mode, jpeg_bytes, text)
             except Exception as e: log.warning("history async failed: %s", e)
@@ -551,8 +525,12 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 "user_info":"Отправь user_id пользователя.",
             }
             return await q.message.reply_text(prompts[cmd])
-        if cmd=="set_limit": ADMIN_STATE[uid]={"mode":"set_limit"}; return await q.message.reply_text(f"FREE_LIMIT={CONFIG.get('FREE_LIMIT')}. Введи новое число.")
-        if cmd=="set_price": ADMIN_STATE[uid]={"mode":"set_price"}; return await q.message.reply_text(f"Цена={CONFIG.get('PRICE_RUB')} ₽. Введи новую цену.")
+        if cmd=="set_limit":
+            ADMIN_STATE[uid]={"mode":"set_limit"}
+            return await q.message.reply_text(f"FREE_LIMIT={CONFIG.get('FREE_LIMIT')}. Введи новое целое число.")
+        if cmd=="set_price":
+            ADMIN_STATE[uid]={"mode":"set_price"}
+            return await q.message.reply_text(f"Цена={CONFIG.get('PRICE_RUB')} ₽. Введи новую цену (целое).")
 
 def extract_user_id_from_message(update:Update)->int|None:
     if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
@@ -596,6 +574,32 @@ async def on_admin_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
                  f"• Известен боту: {'да' if target_id in USERS else 'нет'}\n"
                  f"• Админ: {'да' if target_id in ADMINS else 'нет'}")
             return await update.message.reply_text(txt)
+
+    if mode=="add_free":
+        text=(update.message.text or "").strip(); parts=text.split()
+        if len(parts)<2 or not parts[0].isdigit() or not parts[1].isdigit():
+            return await update.message.reply_text("Формат: user_id количество (пример: 123456 3)")
+        target_id=int(parts[0]); add_n=int(parts[1]); ensure_user(target_id)
+        u=usage_entry(target_id); u["count"]=max(0, u.get("count",0) - add_n); persist_all()
+        return await update.message.reply_text(f"✅ Добавил {add_n} анализов пользователю {target_id}. Использовано: {u['count']}.")
+
+    # >>>>>>> ДОБАВЛЕНО: обработка set_limit / set_price
+    if mode=="set_limit":
+        txt=(update.message.text or "").strip()
+        if not txt.isdigit():
+            return await update.message.reply_text("Введи целое число, например 5")
+        CONFIG["FREE_LIMIT"]=int(txt); persist_all()
+        ADMIN_STATE.pop(admin_id, None)
+        return await update.message.reply_text(f"✅ FREE_LIMIT обновлён: {CONFIG['FREE_LIMIT']}")
+
+    if mode=="set_price":
+        txt=(update.message.text or "").strip()
+        if not txt.isdigit():
+            return await update.message.reply_text("Введи целую цену в ₽, например 299")
+        CONFIG["PRICE_RUB"]=int(txt); persist_all()
+        ADMIN_STATE.pop(admin_id, None)
+        return await update.message.reply_text(f"✅ Цена обновлена: {CONFIG['PRICE_RUB']} ₽")
+    # <<<<<<< ДОБАВЛЕНО
 
 # ---------- ПРОСТЫЕ АДМИН-КОМАНДЫ ----------
 async def cmd_whoami(update:Update, _):
