@@ -361,6 +361,133 @@ def _emoji_bullets(text: str) -> str:
         out.append(line)
     return "\n".join(out)
 
+# --- YooKassa helpers ---
+from yookassa import Configuration as YKConf, Payment as YKPayment
+import uuid
+
+def yk_create_first_payment(user_id: int, amount_rub: int) -> str:
+    """
+    Создаёт оплату в YooKassa и возвращает URL для подтверждения.
+    Если YK_SHOP_ID / YK_SECRET_KEY не заданы — бросит RuntimeError.
+    """
+    if not (os.getenv("YK_SHOP_ID") and os.getenv("YK_SECRET_KEY")):
+        raise RuntimeError("YooKassa не настроена")
+    YKConf.account_id = os.getenv("YK_SHOP_ID")
+    YKConf.secret_key = os.getenv("YK_SECRET_KEY")
+
+    idemp = str(uuid.uuid4())
+    payment = YKPayment.create({
+        "amount": {"value": f"{amount_rub:.2f}", "currency": "RUB"},
+        "capture": True,
+        "confirmation": {"type": "redirect", "return_url": os.getenv("YK_RETURN_URL", "https://example.com/yk/success")},
+        "save_payment_method": True,  # попросим сохранить карту для автопродления
+        "description": f"Beauty Nano Premium 30d (uid {user_id})",
+        "metadata": {"user_id": str(user_id), "purpose": "premium_monthly", "first": "1"},
+    }, idempotency_key=idemp)
+    return payment.confirmation.confirmation_url
+
+
+# --- Telegram Stars helpers ---
+from telegram import LabeledPrice
+
+STARS_PRICE_XTR = int(os.getenv("STARS_PRICE_XTR", "1200"))
+STARS_PAY_TITLE = os.getenv("STARS_PAY_TITLE", "Премиум на 30 дней")
+STARS_PAY_DESC  = os.getenv("STARS_PAY_DESC",  "Безлимит анализов и приоритет")
+
+async def send_stars_invoice_chat(chat_id: int, context):
+    prices = [LabeledPrice(label="Премиум 30 дней", amount=STARS_PRICE_XTR)]
+    await context.bot.send_invoice(
+        chat_id=chat_id,
+        title=STARS_PAY_TITLE,
+        description=STARS_PAY_DESC,
+        payload=f"stars_premium_{chat_id}_{int(time.time())}",
+        currency="XTR",
+        prices=prices,
+        subscription_period=2592000  # 30 дней
+    )
+
+    # --- Promos (Google Sheets) ---
+    def sheets_promo_get(code: str) -> dict | None:
+        """
+        Ищет промокод в листе 'promos'.
+        Ожидаемые колонки: code | bonus_days | uses_left | expires_ts | note
+        Возвращает dict строки или None, если промокод не найден/Sheets не настроены.
+        """
+        if not ('_sh' in globals() and _sh):
+            return None
+        try:
+            ws = _sh.worksheet("promos")
+            rows = ws.get_all_records(numericise_ignore=["all"])
+            code_l = (code or "").strip().lower()
+            for r in rows:
+                if (str(r.get("code") or "").strip().lower()) == code_l:
+                    return r
+        except Exception as e:
+            log.warning("sheets_promo_get failed: %s", e)
+        return None
+
+    def sheets_promo_decrement(code: str) -> bool:
+        """
+        Уменьшает uses_left на 1 для указанного промокода в листе 'promos'.
+        Возвращает True, если успешно; False — если лист недоступен/промокод не найден.
+        """
+        if not ('_sh' in globals() and _sh):
+            return False
+        try:
+            ws = _sh.worksheet("promos")
+            data = ws.get_all_values()  # первая строка — заголовки
+            # ожидаемый порядок: code | bonus_days | uses_left | expires_ts | note
+            for i in range(1, len(data)):
+                row = data[i]
+                if (row[0] or "").strip().lower() == (code or "").strip().lower():
+                    try:
+                        uses = int(row[2]) if str(row[2]).strip().isdigit() else 0
+                        if uses <= 0:
+                            return False
+                        row[2] = str(uses - 1)
+                        ws.update(f"A{i + 1}:E{i + 1}", [row])
+                        return True
+                    except Exception as e:
+                        log.warning("promo decrement parse error: %s", e)
+                        return False
+        except Exception as e:
+            log.warning("sheets_promo_decrement failed: %s", e)
+        return False
+
+
+# --- Промокоды / триал ---
+USER_STATE: dict[int, dict] = {}  # если уже есть — оставь один
+
+def apply_promo(user_id: int, code: str) -> str:
+    """
+    Пробуем применить промокод из Google Sheets (если подключены),
+    иначе — встроенные «free1d».
+    Возвращает текст результата для пользователя.
+    """
+    rec = sheets_promo_get(code) if '_sh' in globals() and _sh else None
+    if rec:
+        try:
+            exp   = int(rec.get("expires_ts") or "0")
+            uses  = int(rec.get("uses_left") or "0")
+            days  = int(rec.get("bonus_days") or "0")
+            if exp and int(time.time()) > exp:
+                return "⏳ Срок действия промокода истёк."
+            if uses <= 0:
+                return "❌ Промокод уже исчерпан."
+            if days > 0:
+                grant_premium(user_id, days)
+                sheets_promo_decrement(code)
+                return f"✅ Активирован {days} дн. Премиума!"
+            return "ℹ️ Промокод валиден, но бонус не задан."
+        except Exception:
+            return "⚠️ Не удалось применить промокод."
+    # встроенный пример
+    if code.strip().lower() == "free1d":
+        grant_premium(user_id, 1)
+        return "✅ 1 день Премиума активирован."
+    return "❌ Промокод не найден."
+
+
 def _themed_headings(text: str) -> str:
     themed=[]
     for ln in (text or "").splitlines():
@@ -731,20 +858,65 @@ def admin_subs_user_kb(target_id: int) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(rows)
 
+async def tg_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.pre_checkout_query.answer(ok=True)
+
+async def tg_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sp = update.message.successful_payment
+    if not sp: return
+    uid = update.effective_user.id
+    if sp.currency == "XTR":  # Stars
+        try:
+            u = usage_entry(uid)
+            u["stars_charge_id"] = sp.telegram_payment_charge_id
+            u["stars_auto_canceled"] = False
+            persist_all()
+        except Exception:
+            pass
+        exp_ts = getattr(sp, "subscription_expiration_date", None)
+        if isinstance(exp_ts, int) and exp_ts > 0:
+            u = usage_entry(uid); u["premium"] = True; u["premium_until"] = exp_ts; persist_all()
+        else:
+            grant_premium(uid, 30)
+        await update.message.reply_text("✅ Премиум оплачен через ⭐️ Stars. Спасибо!",
+                                        reply_markup=action_keyboard(uid, context.user_data))
+
+
 # ---------- CallbackHandler ----------
 ADMIN_STATE: Dict[int, Dict[str,Any]] = {}
 USER_STATE:  Dict[int, Dict[str,Any]] = {}
 
-def payments_me_kb(uid:int)->InlineKeyboardMarkup:
-    u=usage_entry(uid)
-    rows=[[InlineKeyboardButton("⬅️ Назад", callback_data="home")]]
+def payments_me_kb(uid: int) -> InlineKeyboardMarkup:
+    u = usage_entry(uid)
+    rows: list[list[InlineKeyboardButton]] = []
+    if u.get("stars_charge_id"):
+        if not u.get("stars_auto_canceled"):
+            rows.append([InlineKeyboardButton("⛔️ Отключить авто Stars", callback_data="me:stars_cancel")])
+        else:
+            rows.append([InlineKeyboardButton("♻️ Включить авто Stars",  callback_data="me:stars_enable")])
+    if u.get("yk_payment_method_id"):
+        rows.append([InlineKeyboardButton("⛔️ Отключить авто YooKassa", callback_data="me:yk_disable")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
     return InlineKeyboardMarkup(rows)
+
 
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = (q.data or "").strip()
     uid = update.effective_user.id
     ensure_user(uid)
+
+    if data == "payments_me":
+        u = usage_entry(uid)
+        exp = datetime.fromtimestamp(u.get("premium_until", 0)).strftime("%d.%m.%Y %H:%M") if u.get(
+            "premium_until") else "—"
+        txt = (
+            "💳 <b>Мои платежи</b>\n"
+            f"• Премиум: {'активен' if has_premium(uid) else 'не активен'} (до {exp})\n"
+            f"• Stars авто: {('включено' if (u.get('stars_charge_id') and not u.get('stars_auto_canceled')) else 'отключено')}\n"
+            f"• YooKassa авто: {('включено' if u.get('yk_payment_method_id') else 'отключено')}"
+        )
+        return await q.message.reply_text(txt, parse_mode="HTML", reply_markup=payments_me_kb(uid))
 
     # ВАЖНО: отвечаем сразу, ДО любых долгих операций
     await safe_answer(q)
@@ -781,6 +953,48 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"• Премиум: безлимит на 30 дней\n"
                f"• Цена: {price_rub} ₽  /  ⭐️ {STARS_PRICE_XTR}")
         return await q.message.reply_text(txt, parse_mode="HTML")
+
+    # --- YooKassa ---
+    if data == "pay:yookassa":
+        try:
+            url = yk_create_first_payment(uid, int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB)))
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💳 Открыть YooKassa", url=url)],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="premium")],
+            ])
+            return await q.message.reply_text("Открой ссылку и оплати. Премиум активируется автоматически.", reply_markup=kb)
+        except Exception as e:
+            log.warning("YK init failed: %s", e)
+            return await q.message.reply_text("⚠️ Платёж через YooKassa сейчас недоступен.", reply_markup=premium_menu_kb())
+
+    # --- Telegram Stars ---
+    if data == "pay:stars":
+        try:
+            await send_stars_invoice_chat(q.message.chat.id, context)
+            return  # invoice улетел отдельным сообщением
+        except Exception as e:
+            log.warning("Stars invoice error: %s", e)
+            return await q.message.reply_text("⚠️ Не удалось выставить счёт в Stars.", reply_markup=premium_menu_kb())
+
+    # --- Триал 24ч ---
+    if data == "trial":
+        u = usage_entry(uid)
+        if u.get("trial_used"):
+            return await q.message.reply_text("⏳ Триал уже использован.", reply_markup=premium_menu_kb())
+        u["trial_used"] = True
+        till = grant_premium(uid, 1)
+        persist_all()
+        return await q.message.reply_text(
+            f"✅ Триал активирован до {datetime.fromtimestamp(till):%d.%m.%Y %H:%M}.",
+            reply_markup=action_keyboard(uid, context.user_data)
+        )
+
+    # --- Промокод ---
+    if data == "promo":
+        USER_STATE[uid] = {"await": "promo"}
+        return await q.message.reply_text("Введи промокод одним сообщением:")
+
+
 
     # история
     if data=="history":
@@ -986,6 +1200,15 @@ async def on_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 fail += 1
         return await update.message.reply_text(f"📣 Готово: отправлено {sent}, ошибок {fail}.", reply_markup=admin_main_keyboard())
 
+    # ожидание промокода
+    st = USER_STATE.get(uid)
+    if st and st.get("await") == "promo":
+        USER_STATE.pop(uid, None)
+        code = (update.message.text or "").strip()
+        msg = apply_promo(uid, code)
+        return await update.message.reply_text(msg, reply_markup=action_keyboard(uid, context.user_data))
+
+
 # ---------- Flask + сервисные эндпоинты ----------
 def start_flask_endpoints(port:int):
     app=Flask(__name__)
@@ -1025,6 +1248,10 @@ def main():
         name="profile_conv",
         persistent=False,
     )
+
+    app.add_handler(PreCheckoutQueryHandler(tg_precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, tg_successful_payment))
+
     app.add_handler(profile_conv)
 
     app.add_handler(CommandHandler("start", on_start))
