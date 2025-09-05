@@ -960,8 +960,7 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}", reply_markup=admin_main_keyboard())
 
         # плейсхолдеры других разделов
-        if cmd == "pick_users":
-            return await q.message.reply_text("👥 Раздел 'Пользователи' в разработке.", reply_markup=admin_main_keyboard())
+
         if cmd == "stats":
             return await q.message.reply_text("📊 Раздел 'Статистика' в разработке.", reply_markup=admin_main_keyboard())
         if cmd == "broadcast":
