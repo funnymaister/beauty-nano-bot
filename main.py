@@ -850,6 +850,109 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             reply_markup=action_keyboard(uid, context.user_data)
         )
 
+    # ---------- История: списки и показ ----------
+    def _hist_user_dir(uid: int) -> str:
+        p = os.path.join(HISTORY_DIR, str(uid))
+        os.makedirs(p, exist_ok=True)
+        return p
+
+    def _read_file_text(path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return ""
+
+    def sheets_fetch_history(user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        # если Sheets не подключены — вернём пусто
+        if not _sh: return []
+        try:
+            ws = _sh.worksheet("analyses")
+            rows = ws.get_all_records(numericise_ignore=["all"])
+            out = []
+            for r in rows:
+                try:
+                    if int(str(r.get("user_id", "-1")).strip()) != int(user_id):
+                        continue
+                    ts_raw = str(r.get("ts", "")).strip()
+                    ts = int(ts_raw) if ts_raw.isdigit() else int(time.time())
+                    mode = (str(r.get("mode", "both")) or "both").strip().lower()
+                    text = (r.get("text") or "").strip()
+                    out.append({"ts": ts, "mode": mode, "img": None, "txt": None, "txt_inline": text})
+                except Exception:
+                    continue
+            out.sort(key=lambda x: x["ts"], reverse=True)
+            return out[:limit]
+        except Exception as e:
+            log.warning("sheets_fetch_history failed: %s", e)
+            return []
+
+    def list_history(uid: int) -> List[Dict[str, Any]]:
+        # локальные записи
+        local = HISTORY.get(str(uid), [])
+        norm = []
+        for e in local:
+            norm.append({
+                "ts": int(e.get("ts", 0)),
+                "mode": e.get("mode", "both"),
+                "img": e.get("img"),
+                "txt": e.get("txt"),
+                "txt_inline": None
+            })
+        # из Sheets
+        norm += sheets_fetch_history(uid, limit=20)
+
+        # дедуп по ts и сортировка
+        uniq = {}
+        for e in norm:
+            if not e.get("ts"): continue
+            uniq[e["ts"]] = e
+        return sorted(uniq.values(), key=lambda x: x["ts"], reverse=True)
+
+    def history_keyboard(uid: int) -> InlineKeyboardMarkup:
+        entries = list_history(uid)
+        rows = []
+        if entries:
+            for e in entries[:10]:
+                dt = datetime.fromtimestamp(int(e["ts"])).strftime("%d.%m %H:%M")
+                mode = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}.get(e.get("mode", "both"), "")
+                rows.append([InlineKeyboardButton(f"📸 {dt} • {mode}", callback_data=f"hist:{e['ts']}")])
+        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
+        return InlineKeyboardMarkup(rows)
+
+    async def show_history_entry(uid: int, entry: Dict[str, Any], chat, user_data):
+        dt = datetime.fromtimestamp(int(entry["ts"])).strftime("%d.%m.%Y %H:%M")
+        mode_title = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}.get(entry.get("mode", "both"),
+                                                                                     "Анализ")
+        head = f"<b>💄 История — {mode_title}</b>\n<i>{dt}</i>\n━━━━━━━━━━━━━━━━\n"
+
+        # берём текст
+        text = ""
+        if entry.get("txt_inline"):
+            text = entry["txt_inline"]
+        elif entry.get("txt"):
+            text = _read_file_text(entry["txt"])
+        text = text.strip() or "Текст отсутствует."
+
+        # немного стилизации (если у тебя уже есть функции — они подхватятся)
+        try:
+            styled = _themed_headings(_emoji_bullets(text))
+        except Exception:
+            styled = html_escape(text)
+
+        html = head + styled
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К списку", callback_data="history")],
+                                   [InlineKeyboardButton("🏠 Домой", callback_data="home")]])
+
+        # если есть локальная картинка — пошлём фото с подписью; иначе — просто текст
+        if entry.get("img") and os.path.exists(entry["img"]):
+            try:
+                with open(entry["img"], "rb") as f:
+                    await chat.send_photo(photo=f, caption=f"📸 {dt}", reply_markup=None)
+            except Exception as e:
+                log.warning("send_photo failed: %s", e)
+        await send_html_long(chat, html, keyboard=kb)
+
     # --- лимиты/цены ---
     if data == "limits":
         await q.answer()
@@ -863,6 +966,29 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         )
         return await q.message.reply_text(txt, parse_mode="HTML")
 
+    # --- История: список ---
+    if data == "history":
+        await q.answer()
+        entries = list_history(uid)
+        if not entries:
+            return await q.message.reply_text(
+                "История пуста. Пришли фото — и я сохраню результат 📒",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="home")]])
+            )
+        return await q.message.reply_text("Выбери запись из истории:", reply_markup=history_keyboard(uid))
+
+    # --- История: просмотр записи ---
+    if data.startswith("hist:"):
+        await q.answer()
+        try:
+            ts = int(data.split(":",1)[1])
+        except Exception:
+            return await q.message.reply_text("Некорректная запись истории.", reply_markup=history_keyboard(uid))
+        entries = list_history(uid)
+        entry = next((e for e in entries if int(e["ts"]) == ts), None)
+        if not entry:
+            return await q.message.reply_text("Запись не найдена.", reply_markup=history_keyboard(uid))
+        return await show_history_entry(uid, entry, q.message.chat, context.user_data)
 
 
     # === ADMIN ===
