@@ -743,19 +743,16 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
 
 def premium_menu_kb() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    # YooKassa показываем только если настроена
-    if os.getenv("YK_SHOP_ID") and os.getenv("YK_SECRET_KEY"):
-        rows.append([InlineKeyboardButton("💳 YooKassa (RUB)", callback_data="pay:yookassa")])
-    # Stars — всегда
-    rows.append([InlineKeyboardButton("⭐️ Telegram Stars", callback_data="pay:stars")])
-    # Триал и промокод
+    # 👇 показываем всегда
+    rows.append([InlineKeyboardButton("💳 YooKassa (RUB)", callback_data="pay:yookassa")])
+    rows.append([InlineKeyboardButton("⭐️ Telegram Stars",  callback_data="pay:stars")])
     rows.append([
         InlineKeyboardButton("🎁 Триал 24ч", callback_data="trial"),
-        InlineKeyboardButton("🎟️ Промокод", callback_data="promo")
+        InlineKeyboardButton("🎟️ Промокод",  callback_data="promo")
     ])
-    # Назад
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
     return InlineKeyboardMarkup(rows)
+
 
 
 # ---------- Админ-меню (клавиатуры) ----------
@@ -955,17 +952,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.message.reply_text(txt, parse_mode="HTML")
 
     # --- YooKassa ---
+    # --- YooKassa ---
     if data == "pay:yookassa":
+        if not (os.getenv("YK_SHOP_ID") and os.getenv("YK_SECRET_KEY")):
+            miss = []
+            if not os.getenv("YK_SHOP_ID"):
+                miss.append("YK_SHOP_ID")
+            if not os.getenv("YK_SECRET_KEY"):
+                miss.append("YK_SECRET_KEY")
+            return await q.message.reply_text(
+                "⚠️ ЮKassa ещё не настроена.\n"
+                f"Добавь в ENV: {', '.join(miss)}\n"
+                "Также укажи YK_RETURN_URL (например, https://<домен>/yk/success).",
+                reply_markup=premium_menu_kb()
+            )
         try:
             url = yk_create_first_payment(uid, int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB)))
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("💳 Открыть YooKassa", url=url)],
                 [InlineKeyboardButton("⬅️ Назад", callback_data="premium")],
             ])
-            return await q.message.reply_text("Открой ссылку и оплати. Премиум активируется автоматически.", reply_markup=kb)
+            return await q.message.reply_text(
+                "Открой ссылку и оплати. Премиум активируется автоматически.",
+                reply_markup=kb
+            )
         except Exception as e:
             log.warning("YK init failed: %s", e)
-            return await q.message.reply_text("⚠️ Платёж через YooKassa сейчас недоступен.", reply_markup=premium_menu_kb())
+            return await q.message.reply_text(
+                "⚠️ Платёж через YooKassa сейчас недоступен.",
+                reply_markup=premium_menu_kb()
+            )
 
     # --- Telegram Stars ---
     if data == "pay:stars":
