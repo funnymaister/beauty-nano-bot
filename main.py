@@ -510,25 +510,26 @@ def human_dt(ts: int | float | None) -> str:
     except Exception: return "—"
 
 def admin_subs_list_kb() -> InlineKeyboardMarkup:
-    now=int(time.time()); candidates=[]
-    for uid,u in USAGE.items():
-        if int(u.get("premium_until",0))>now or u.get("yk_payment_method_id") or u.get("stars_charge_id"):
+    now = int(time.time()); candidates = []
+    for uid, u in USAGE.items():
+        if int(u.get("premium_until", 0)) > now or u.get("yk_payment_method_id") or u.get("stars_charge_id"):
             candidates.append(int(uid))
-    candidates=sorted(candidates, key=lambda i:int(USAGE.get(i,{}).get("premium_until",0)), reverse=True)[:12]
-    rows=[]
+    candidates = sorted(candidates, key=lambda i: int(USAGE.get(i, {}).get("premium_until", 0)), reverse=True)[:12]
+    rows = []
     for i in candidates:
-        u=usage_entry(i); exp=human_dt(u.get("premium_until"))
-        star="⭐️" if u.get("stars_charge_id") else ""
-        yk="💳" if u.get("yk_payment_method_id") else ""
+        u = usage_entry(i); exp = human_dt(u.get("premium_until"))
+        star = "⭐️" if u.get("stars_charge_id") else ""
+        yk   = "💳" if u.get("yk_payment_method_id") else ""
         rows.append([InlineKeyboardButton(f"{i} • до {exp} {star}{yk}", callback_data=f"admin:subs_user:{i}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад",callback_data="admin")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
 def admin_subs_user_kb(target_id: int) -> InlineKeyboardMarkup:
-    u=usage_entry(target_id)
-    has_stars=bool(u.get("stars_charge_id")); stars_canceled=bool(u.get("stars_auto_canceled"))
-    has_yk=bool(u.get("yk_payment_method_id"))
-    rows=[]
+    u = usage_entry(target_id)
+    has_stars = bool(u.get("stars_charge_id"))
+    stars_canceled = bool(u.get("stars_auto_canceled"))
+    has_yk = bool(u.get("yk_payment_method_id"))
+    rows = []
     if has_stars:
         if not stars_canceled:
             rows.append([InlineKeyboardButton("⛔️ Отключить авто Stars", callback_data=f"admin:subs_action:stars_cancel:{target_id}")])
@@ -540,6 +541,7 @@ def admin_subs_user_kb(target_id: int) -> InlineKeyboardMarkup:
                  InlineKeyboardButton("❌ Снять премиум", callback_data=f"admin:subs_action:clear:{target_id}")])
     rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:subs_list")])
     return InlineKeyboardMarkup(rows)
+
 
 
 # ========== YooKassa ==========
@@ -799,6 +801,101 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             return await q.message.reply_text(f"⚠️ Не удалось изменить подписку Stars: {e}")
         return await on_callback(Update(update.update_id, callback_query=update.callback_query), context)
+
+    # === ADMIN ROOT ===
+    if data == "admin":
+        if uid not in ADMINS:
+            return await q.answer("Нет прав", show_alert=True)
+        await q.answer()
+        return await q.message.reply_text("🛠 Админ-панель", reply_markup=admin_main_keyboard())
+
+    # === ADMIN SUBROUTES ===
+    if data.startswith("admin:"):
+        if uid not in ADMINS:
+            return await q.answer("Нет прав", show_alert=True)
+        await q.answer()
+        parts = data.split(":")
+        cmd = parts[1] if len(parts) > 1 else ""
+
+        # раздел Подписки
+        if cmd == "subs":
+            return await q.message.reply_text("💳 Управление подписками", reply_markup=admin_subs_list_kb())
+
+        if cmd == "subs_list":
+            return await q.message.reply_text("💳 Активные подписки:", reply_markup=admin_subs_list_kb())
+
+        if cmd == "subs_user" and len(parts) >= 3 and parts[2].isdigit():
+            target = int(parts[2])
+            u2 = usage_entry(target)
+            exp = human_dt(u2.get("premium_until"))
+            txt = (f"👤 Пользователь {target}\n"
+                   f"• Премиум до: {exp}\n"
+                   f"• Stars charge: {u2.get('stars_charge_id','—')}\n"
+                   f"• YK PM: {u2.get('yk_payment_method_id','—')}\n"
+                   f"• Stars авто: {'отключено' if u2.get('stars_auto_canceled') else 'включено'}")
+            return await q.message.reply_text(txt, reply_markup=admin_subs_user_kb(target))
+
+        if cmd == "subs_action" and len(parts) >= 4:
+            action = parts[2]
+            try:
+                target = int(parts[3])
+            except:
+                return await q.message.reply_text("Некорректный user_id.", reply_markup=admin_main_keyboard())
+            u2 = usage_entry(target)
+
+            if action == "add30":
+                till = extend_premium_days(target, 30)
+                return await q.message.reply_text(f"✅ Продлено до {human_dt(till)}", reply_markup=admin_subs_user_kb(target))
+
+            if action == "clear":
+                u2["premium"] = False
+                u2["premium_until"] = 0
+                persist_all()
+                return await q.message.reply_text("✅ Премиум снят.", reply_markup=admin_subs_user_kb(target))
+
+            if action == "yk_disable":
+                ok = disable_yk_autorenew(target)
+                msg = "✅ Автопродление YooKassa отключено." if ok else "ℹ️ Не было сохранённого способа YooKassa."
+                return await q.message.reply_text(msg, reply_markup=admin_subs_user_kb(target))
+
+            if action in ("stars_cancel", "stars_enable"):
+                ch = u2.get("stars_charge_id")
+                if not ch:
+                    return await q.message.reply_text("ℹ️ Нет активной Stars-подписки.", reply_markup=admin_subs_user_kb(target))
+                try:
+                    is_canceled = (action == "stars_cancel")
+                    await context.bot.edit_user_star_subscription(
+                        user_id=target, telegram_payment_charge_id=ch, is_canceled=is_canceled
+                    )
+                    u2["stars_auto_canceled"] = is_canceled
+                    persist_all()
+                    state = "отключено" if is_canceled else "включено"
+                    return await q.message.reply_text(f"✅ Автопродление Stars {state}.", reply_markup=admin_subs_user_kb(target))
+                except AttributeError:
+                    return await q.message.reply_text("⚠️ Нужна python-telegram-bot 21.8+ для управления Stars.")
+                except Exception as e:
+                    return await q.message.reply_text(f"⚠️ Ошибка Stars: {e}", reply_markup=admin_subs_user_kb(target))
+
+        # обновление справочников
+        if cmd == "reload_refs":
+            try:
+                REF.reload_all()
+                return await q.message.reply_text("✅ Справочники обновлены.", reply_markup=admin_main_keyboard())
+            except Exception as e:
+                return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}", reply_markup=admin_main_keyboard())
+
+        # плейсхолдеры других разделов
+        if cmd == "pick_users":
+            return await q.message.reply_text("👥 Раздел 'Пользователи' в разработке.", reply_markup=admin_main_keyboard())
+        if cmd == "stats":
+            return await q.message.reply_text("📊 Раздел 'Статистика' в разработке.", reply_markup=admin_main_keyboard())
+        if cmd == "broadcast":
+            return await q.message.reply_text("📣 Раздел 'Рассылка' в разработке.", reply_markup=admin_main_keyboard())
+        if cmd == "bonus":
+            return await q.message.reply_text("🎁 Раздел 'Бонусы' в разработке.", reply_markup=admin_main_keyboard())
+        if cmd == "settings":
+            return await q.message.reply_text("⚙️ Раздел 'Настройки' в разработке.", reply_markup=admin_main_keyboard())
+
 
     # --- фидбек ---
     if data == "fb:up":
