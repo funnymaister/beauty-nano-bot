@@ -960,7 +960,8 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}", reply_markup=admin_main_keyboard())
 
         # плейсхолдеры других разделов
-
+        if cmd == "pick_users":
+            return await q.message.reply_text("👥 Раздел 'Пользователи' в разработке.", reply_markup=admin_main_keyboard())
         if cmd == "stats":
             return await q.message.reply_text("📊 Раздел 'Статистика' в разработке.", reply_markup=admin_main_keyboard())
         if cmd == "broadcast":
@@ -969,60 +970,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text("🎁 Раздел 'Бонусы' в разработке.", reply_markup=admin_main_keyboard())
         if cmd == "settings":
             return await q.message.reply_text("⚙️ Раздел 'Настройки' в разработке.", reply_markup=admin_main_keyboard())
-
-        # --- Админ: Пользователи ---
-        if cmd == "pick_users":
-            return await q.message.reply_text("👥 Пользователи", reply_markup=admin_users_list_kb(page=0))
-
-        if cmd == "users_page" and len(parts) >= 3:
-            try:
-                page = int(parts[2])
-            except:
-                page = 0
-            return await q.message.reply_text("👥 Пользователи", reply_markup=admin_users_list_kb(page=page))
-
-        if cmd == "user" and len(parts) >= 3 and parts[2].isdigit():
-            target = int(parts[2])
-            u = usage_entry(target)
-            exp = human_dt(u.get("premium_until"))
-            txt = (f"👤 Пользователь {target}\n"
-                   f"• Премиум до: {exp}\n"
-                   f"• Бесплатных использовано: {u.get('count',0)} / {CONFIG.get('FREE_LIMIT', DEFAULT_FREE_LIMIT)}\n"
-                   f"• Админ: {'да' if target in ADMINS else 'нет'}")
-            return await q.message.reply_text(txt, reply_markup=admin_user_card_kb(target))
-
-        if cmd == "user_action" and len(parts) >= 4:
-            action = parts[2]
-            try:
-                target = int(parts[3])
-            except:
-                return await q.message.reply_text("Некорректный user_id.", reply_markup=admin_main_keyboard())
-            u = usage_entry(target)
-
-            if action == "add30":
-                till = extend_premium_days(target, 30)
-                return await q.message.reply_text(f"✅ Продлено до {human_dt(till)}", reply_markup=admin_user_card_kb(target))
-
-            if action == "clear":
-                u["premium"] = False
-                u["premium_until"] = 0
-                persist_all()
-                return await q.message.reply_text("✅ Премиум снят.", reply_markup=admin_user_card_kb(target))
-
-            if action == "resetfree":
-                u["count"] = 0
-                persist_all()
-                return await q.message.reply_text("✅ Бесплатные попытки сброшены.", reply_markup=admin_user_card_kb(target))
-
-            if action == "admin":
-                ADMINS.add(target); persist_all()
-                return await q.message.reply_text("✅ Пользователь назначен админом.", reply_markup=admin_user_card_kb(target))
-
-            if action == "unadmin":
-                if target in ADMINS: ADMINS.remove(target)
-                persist_all()
-                return await q.message.reply_text("✅ Права админа сняты.", reply_markup=admin_user_card_kb(target))
-
 
     # --- фидбек ---
     if data == "fb:up":
