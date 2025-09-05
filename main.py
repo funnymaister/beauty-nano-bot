@@ -1238,6 +1238,70 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         if uid not in ADMINS: return await q.answer("Нет прав", show_alert=True)
         await q.answer(); parts=data.split(":"); cmd=parts[1]
 
+        # --- Админ: Пользователи ---
+        if cmd == "pick_users":
+            # стартовая страница 0
+            return await q.message.reply_text(
+                "👥 Пользователи",
+                reply_markup=admin_users_list_kb(page=0)
+            )
+
+        if cmd == "users_page" and len(parts) >= 3:
+            try:
+                page = int(parts[2])
+            except Exception:
+                page = 0
+            return await q.message.reply_text(
+                "👥 Пользователи",
+                reply_markup=admin_users_list_kb(page=page)
+            )
+
+        if cmd == "user" and len(parts) >= 3 and parts[2].isdigit():
+            target = int(parts[2])
+            u = usage_entry(target)
+            exp = human_dt(u.get("premium_until"))
+            txt = (f"👤 Пользователь {target}\n"
+                   f"• Премиум до: {exp}\n"
+                   f"• Бесплатных использовано: {u.get('count', 0)} / {CONFIG.get('FREE_LIMIT', DEFAULT_FREE_LIMIT)}\n"
+                   f"• Админ: {'да' if target in ADMINS else 'нет'}")
+            return await q.message.reply_text(txt, reply_markup=admin_user_card_kb(target))
+
+        if cmd == "user_action" and len(parts) >= 4:
+            action = parts[2]
+            try:
+                target = int(parts[3])
+            except Exception:
+                return await q.message.reply_text("Некорректный user_id.", reply_markup=admin_main_keyboard())
+            u = usage_entry(target)
+
+            if action == "add30":
+                till = extend_premium_days(target, 30)
+                return await q.message.reply_text(f"✅ Продлено до {human_dt(till)}",
+                                                  reply_markup=admin_user_card_kb(target))
+
+            if action == "clear":
+                u["premium"] = False
+                u["premium_until"] = 0
+                persist_all()
+                return await q.message.reply_text("✅ Премиум снят.", reply_markup=admin_user_card_kb(target))
+
+            if action == "resetfree":
+                u["count"] = 0
+                persist_all()
+                return await q.message.reply_text("✅ Бесплатные попытки сброшены.",
+                                                  reply_markup=admin_user_card_kb(target))
+
+            if action == "admin":
+                ADMINS.add(target);
+                persist_all()
+                return await q.message.reply_text("✅ Пользователь назначен админом.",
+                                                  reply_markup=admin_user_card_kb(target))
+
+            if action == "unadmin":
+                if target in ADMINS: ADMINS.remove(target)
+                persist_all()
+                return await q.message.reply_text("✅ Права админа сняты.", reply_markup=admin_user_card_kb(target))
+
         if cmd=="subs":      return await q.message.reply_text("💳 Управление подписками", reply_markup=admin_subs_list_kb())
         if cmd=="subs_list": return await q.message.reply_text("💳 Активные подписки:", reply_markup=admin_subs_list_kb())
 
