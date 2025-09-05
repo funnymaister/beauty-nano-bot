@@ -324,6 +324,27 @@ async def send_html_long(chat, html_text:str, keyboard=None):
     try: await chat.send_message(last, parse_mode="HTML", reply_markup=keyboard)
     except BadRequest: await chat.send_message(re.sub(r"<[^>]+>","",last), reply_markup=keyboard)
 
+# ---------- Режимы ----------
+MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}
+
+def get_mode(user_data: dict) -> str:
+    return user_data.get("mode", "both")
+
+def set_mode(user_data: dict, mode: str) -> None:
+    if mode in MODES:
+        user_data["mode"] = mode
+
+def mode_keyboard(active: str) -> InlineKeyboardMarkup:
+    def label(key):
+        name = MODES.get(key, key)
+        return f"✅ {name}" if key == active else name
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(label("face"), callback_data="mode:face"),
+         InlineKeyboardButton(label("hair"), callback_data="mode:hair")],
+        [InlineKeyboardButton(label("both"), callback_data="mode:both")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="home")]
+    ])
+
 
 # ========== History (локально + Sheets) ==========
 HISTORY_ENABLED = HISTORY_ENABLED
@@ -393,7 +414,7 @@ def history_keyboard(uid:int)->InlineKeyboardMarkup:
 
 
 # ========== Кнопки ==========
-def action_keyboard(for_user_id:int, user_data:dict|None=None) -> InlineKeyboardMarkup:
+def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKeyboardMarkup:
     premium = has_premium(for_user_id)
     rows = [
         [InlineKeyboardButton("🔄 Новый анализ", callback_data="home")],
@@ -412,6 +433,7 @@ def action_keyboard(for_user_id:int, user_data:dict|None=None) -> InlineKeyboard
     if for_user_id in ADMINS:
         rows.append([InlineKeyboardButton("🛠 Администратор", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
+
 
 def premium_menu_kb()->InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -805,6 +827,42 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             f"👍 {FEEDBACK.get('up',0)}  |  👎 {FEEDBACK.get('down',0)}",
             reply_markup=action_keyboard(uid, context.user_data)
         )
+
+    # Лог на всякий случай — видно, что приходит
+    log.info("callback data=%s", data)
+
+    # --- меню режима ---
+    if data == "mode_menu":
+        await q.answer()
+        cur = get_mode(context.user_data)
+        return await q.message.reply_text(
+            f"Текущий режим: {MODES.get(cur, cur)}\nВыбери:",
+            reply_markup=mode_keyboard(cur)
+        )
+
+    # --- установка режима ---
+    if data.startswith("mode:"):
+        await q.answer("Режим обновлён")
+        m = data.split(":", 1)[1]
+        set_mode(context.user_data, m)
+        return await q.message.reply_text(
+            f"Режим установлен: {MODES.get(m, m)}\nПришли фото.",
+            reply_markup=action_keyboard(uid, context.user_data)
+        )
+
+    # --- лимиты/цены ---
+    if data == "limits":
+        await q.answer()
+        free_limit = int(CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT))
+        price_rub  = int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
+        txt = (
+            "ℹ️ <b>Лимиты и цена</b>\n"
+            f"• Бесплатно: {free_limit} анализов/день\n"
+            f"• Премиум: безлимит на 30 дней\n"
+            f"• Цена: {price_rub} ₽  /  ⭐️ {STARS_PRICE_XTR}"
+        )
+        return await q.message.reply_text(txt, parse_mode="HTML")
+
 
 
     # === ADMIN ===
