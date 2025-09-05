@@ -434,6 +434,7 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
         rows.append([InlineKeyboardButton("🛠 Администратор", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
+# ---------- Админ-меню (клавиатуры) ----------
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("👥 Пользователи", callback_data="admin:pick_users"),
@@ -445,6 +446,40 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄 Обновить справочники", callback_data="admin:reload_refs")],
         [InlineKeyboardButton("⬅️ Назад", callback_data="home")]
     ])
+
+def admin_subs_list_kb() -> InlineKeyboardMarkup:
+    now = int(time.time()); candidates = []
+    for uid, u in USAGE.items():
+        if int(u.get("premium_until", 0)) > now or u.get("yk_payment_method_id") or u.get("stars_charge_id"):
+            candidates.append(int(uid))
+    candidates = sorted(candidates, key=lambda i: int(USAGE.get(i, {}).get("premium_until", 0)), reverse=True)[:12]
+    rows = []
+    for i in candidates:
+        u = usage_entry(i); exp = human_dt(u.get("premium_until"))
+        star = "⭐️" if u.get("stars_charge_id") else ""
+        yk   = "💳" if u.get("yk_payment_method_id") else ""
+        rows.append([InlineKeyboardButton(f"{i} • до {exp} {star}{yk}", callback_data=f"admin:subs_user:{i}")])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
+
+def admin_subs_user_kb(target_id: int) -> InlineKeyboardMarkup:
+    u = usage_entry(target_id)
+    has_stars = bool(u.get("stars_charge_id"))
+    stars_canceled = bool(u.get("stars_auto_canceled"))
+    has_yk = bool(u.get("yk_payment_method_id"))
+    rows = []
+    if has_stars:
+        if not stars_canceled:
+            rows.append([InlineKeyboardButton("⛔️ Отключить авто Stars", callback_data=f"admin:subs_action:stars_cancel:{target_id}")])
+        else:
+            rows.append([InlineKeyboardButton("♻️ Включить авто Stars",  callback_data=f"admin:subs_action:stars_enable:{target_id}")])
+    if has_yk:
+        rows.append([InlineKeyboardButton("⛔️ Отключить авто YooKassa", callback_data=f"admin:subs_action:yk_disable:{target_id}")])
+    rows.append([InlineKeyboardButton("➕ +30 дней", callback_data=f"admin:subs_action:add30:{target_id}"),
+                 InlineKeyboardButton("❌ Снять премиум", callback_data=f"admin:subs_action:clear:{target_id}")])
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:subs_list")])
+    return InlineKeyboardMarkup(rows)
+
 
 
 
@@ -515,46 +550,6 @@ async def profile_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменил. /profile — начать заново.")
     return ConversationHandler.END
-
-# Админ меню подписок
-def human_dt(ts: int | float | None) -> str:
-    if not ts: return "—"
-    try: return datetime.fromtimestamp(int(ts)).strftime("%d.%m.%Y %H:%M")
-    except Exception: return "—"
-
-def admin_subs_list_kb() -> InlineKeyboardMarkup:
-    now = int(time.time()); candidates = []
-    for uid, u in USAGE.items():
-        if int(u.get("premium_until", 0)) > now or u.get("yk_payment_method_id") or u.get("stars_charge_id"):
-            candidates.append(int(uid))
-    candidates = sorted(candidates, key=lambda i: int(USAGE.get(i, {}).get("premium_until", 0)), reverse=True)[:12]
-    rows = []
-    for i in candidates:
-        u = usage_entry(i); exp = human_dt(u.get("premium_until"))
-        star = "⭐️" if u.get("stars_charge_id") else ""
-        yk   = "💳" if u.get("yk_payment_method_id") else ""
-        rows.append([InlineKeyboardButton(f"{i} • до {exp} {star}{yk}", callback_data=f"admin:subs_user:{i}")])
-    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin")])
-    return InlineKeyboardMarkup(rows)
-
-def admin_subs_user_kb(target_id: int) -> InlineKeyboardMarkup:
-    u = usage_entry(target_id)
-    has_stars = bool(u.get("stars_charge_id"))
-    stars_canceled = bool(u.get("stars_auto_canceled"))
-    has_yk = bool(u.get("yk_payment_method_id"))
-    rows = []
-    if has_stars:
-        if not stars_canceled:
-            rows.append([InlineKeyboardButton("⛔️ Отключить авто Stars", callback_data=f"admin:subs_action:stars_cancel:{target_id}")])
-        else:
-            rows.append([InlineKeyboardButton("♻️ Включить авто Stars",  callback_data=f"admin:subs_action:stars_enable:{target_id}")])
-    if has_yk:
-        rows.append([InlineKeyboardButton("⛔️ Отключить авто YooKassa", callback_data=f"admin:subs_action:yk_disable:{target_id}")])
-    rows.append([InlineKeyboardButton("➕ +30 дней", callback_data=f"admin:subs_action:add30:{target_id}"),
-                 InlineKeyboardButton("❌ Снять премиум", callback_data=f"admin:subs_action:clear:{target_id}")])
-    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:subs_list")])
-    return InlineKeyboardMarkup(rows)
-
 
 
 # ========== YooKassa ==========
