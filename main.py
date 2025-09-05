@@ -434,6 +434,19 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
         rows.append([InlineKeyboardButton("🛠 Администратор", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
+def admin_main_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Пользователи", callback_data="admin:pick_users"),
+         InlineKeyboardButton("📊 Статистика",  callback_data="admin:stats")],
+        [InlineKeyboardButton("💳 Подписки",    callback_data="admin:subs"),
+         InlineKeyboardButton("📣 Рассылка",    callback_data="admin:broadcast")],
+        [InlineKeyboardButton("🎁 Бонусы",      callback_data="admin:bonus"),
+         InlineKeyboardButton("⚙️ Настройки",   callback_data="admin:settings")],
+        [InlineKeyboardButton("🔄 Обновить справочники", callback_data="admin:reload_refs")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="home")]
+    ])
+
+
 
 def premium_menu_kb()->InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
