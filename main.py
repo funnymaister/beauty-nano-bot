@@ -391,6 +391,18 @@ def _split_chunks(s: str, limit:int=SAFE_CHUNK)->list[str]:
     if s: parts.append(s)
     return parts
 
+from contextlib import suppress
+from telegram.error import BadRequest
+
+async def safe_answer(q):
+    """Мягко отвечает на callback_query и игнорирует протухший/невалидный id."""
+    if not q:
+        return
+    with suppress(BadRequest, TimeoutError, Exception):
+        # cache_time не обязателен, но иногда помогает телеграму не спамить
+        await q.answer(cache_time=1)
+
+
 async def send_html_long(chat, html_text:str, keyboard=None):
     chunks=_split_chunks(html_text, SAFE_CHUNK)
     if not chunks: return
@@ -400,6 +412,7 @@ async def send_html_long(chat, html_text:str, keyboard=None):
     last=chunks[-1]
     try: await chat.send_message(last, parse_mode="HTML", reply_markup=keyboard)
     except BadRequest: await chat.send_message(re.sub(r"<[^>]+>","",last), reply_markup=keyboard)
+
 
 # ---------- Режимы ----------
 MODES = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}
@@ -709,13 +722,21 @@ def payments_me_kb(uid:int)->InlineKeyboardMarkup:
     rows=[[InlineKeyboardButton("⬅️ Назад", callback_data="home")]]
     return InlineKeyboardMarkup(rows)
 
-async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query; data=(q.data or "").strip()
-    uid=update.effective_user.id; ensure_user(uid)
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = (q.data or "").strip()
+    uid = update.effective_user.id
+    ensure_user(uid)
 
-    if data=="home":
-        await q.answer()
-        return await q.message.reply_text("Пришли фото — сделаю анализ 💄", reply_markup=action_keyboard(uid, context.user_data))
+    # ВАЖНО: отвечаем сразу, ДО любых долгих операций
+    await safe_answer(q)
+
+    # дальше твоя логика:
+    if data == "home":
+        return await q.message.reply_text("Пришли фото — сделаю анализ 💄",
+                                          reply_markup=action_keyboard(uid, context.user_data))
+    ...
+
 
     # профиль (из кнопки)
     if data == "profile":
