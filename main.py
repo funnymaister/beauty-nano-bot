@@ -897,6 +897,13 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(f"⚠️ Не удалось изменить подписку Stars: {e}")
         return await on_callback(Update(update.update_id, callback_query=update.callback_query), context)
 
+    # --- профиль (старт опроса из кнопки) ---
+    if data == "profile":
+        await q.answer()
+        # передаём управление в ConversationHandler-старт из callback
+        return await profile_start_cb(update, context)
+
+
     # --- фидбек ---
     if data == "fb:up":
         FEEDBACK["up"] = FEEDBACK.get("up", 0) + 1
