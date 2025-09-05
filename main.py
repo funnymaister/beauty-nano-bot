@@ -393,18 +393,24 @@ def history_keyboard(uid:int)->InlineKeyboardMarkup:
 
 
 # ========== Кнопки ==========
-def action_keyboard(for_user_id:int, user_data:dict|None=None)->InlineKeyboardMarkup:
-    premium=has_premium(for_user_id)
-    rows=[
-        [InlineKeyboardButton("🔄 Новый анализ",callback_data="home")],
-        [InlineKeyboardButton("⚙️ Режим",callback_data="mode_menu"),
-         InlineKeyboardButton("🗂 История",callback_data="history")],
-        [InlineKeyboardButton("ℹ️ Лимиты",callback_data="limits"),
-         InlineKeyboardButton("💳 Мои платежи",callback_data="payments_me")],
+def action_keyboard(for_user_id:int, user_data:dict|None=None) -> InlineKeyboardMarkup:
+    premium = has_premium(for_user_id)
+    rows = [
+        [InlineKeyboardButton("🔄 Новый анализ", callback_data="home")],
+        [InlineKeyboardButton("⚙️ Режим", callback_data="mode_menu"),
+         InlineKeyboardButton("🧑‍💼 Профиль", callback_data="profile")],
+        [InlineKeyboardButton("🗂 История", callback_data="history")],
+        [InlineKeyboardButton("👍 Полезно", callback_data="fb:up"),
+         InlineKeyboardButton("👎 Не очень", callback_data="fb:down")],
+        [InlineKeyboardButton("ℹ️ Лимиты", callback_data="limits"),
+         InlineKeyboardButton("💳 Мои платежи", callback_data="payments_me")],
     ]
-    if not premium: rows.append([InlineKeyboardButton("🌟 Премиум",callback_data="premium")])
-    else: rows.append([InlineKeyboardButton("💳 Управление премиумом",callback_data="premium")])
-    if for_user_id in ADMINS: rows.append([InlineKeyboardButton("🛠 Администратор",callback_data="admin")])
+    if not premium:
+        rows.append([InlineKeyboardButton("🌟 Премиум", callback_data="premium")])
+    else:
+        rows.append([InlineKeyboardButton("💳 Управление премиумом", callback_data="premium")])
+    if for_user_id in ADMINS:
+        rows.append([InlineKeyboardButton("🛠 Администратор", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
 def premium_menu_kb()->InlineKeyboardMarkup:
@@ -415,6 +421,65 @@ def premium_menu_kb()->InlineKeyboardMarkup:
          InlineKeyboardButton("🎟️ Промокод",        callback_data="promo")],
         [InlineKeyboardButton("⬅️ Назад",           callback_data="home")],
     ])
+
+# ---------- Профиль (опросник) ----------
+# Состояния диалога
+P_AGE, P_SKIN, P_HAIR, P_GOALS = range(4)
+
+def get_profile(user_data: dict) -> dict:
+    return user_data.setdefault("profile", {})
+
+def profile_to_text(pr: dict) -> str:
+    if not pr:
+        return "Профиль пуст."
+    parts = []
+    if pr.get("age"):  parts.append(f"Возраст: {pr['age']}")
+    if pr.get("skin"): parts.append(f"Кожа: {pr['skin']}")
+    if pr.get("hair"): parts.append(f"Волосы: {pr['hair']}")
+    if pr.get("goals"):parts.append(f"Цели: {pr['goals']}")
+    return "\n".join(parts)
+
+# Старт по команде /profile
+async def profile_start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Сколько тебе лет? (5–100)")
+    return P_AGE
+
+# Старт по кнопке «Профиль» (callback)
+async def profile_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.message.reply_text("Сколько тебе лет? (5–100)")
+    return P_AGE
+
+async def profile_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    t = (update.message.text or "").strip()
+    if not t.isdigit() or not (5 <= int(t) <= 100):
+        return await update.message.reply_text("Введи возраст числом от 5 до 100.")
+    get_profile(context.user_data)["age"] = int(t)
+    await update.message.reply_text("Опиши тип/состояние кожи (например: комбинированная, чувствительная):")
+    return P_SKIN
+
+async def profile_skin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    get_profile(context.user_data)["skin"] = (update.message.text or "").strip()[:100]
+    await update.message.reply_text("Опиши тип/состояние волос (например: тонкие, склонны к жирности):")
+    return P_HAIR
+
+async def profile_hair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    get_profile(context.user_data)["hair"] = (update.message.text or "").strip()[:120]
+    await update.message.reply_text("Какие цели/предпочтения? (например: меньше блеска, объём, без сульфатов):")
+    return P_GOALS
+
+async def profile_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    get_profile(context.user_data)["goals"] = (update.message.text or "").strip()[:160]
+    await update.message.reply_text("Профиль сохранён:\n\n" + profile_to_text(get_profile(context.user_data)))
+    # покажем основное меню
+    await update.message.reply_text("Готово! Можешь прислать фото для анализа 💄",
+                                    reply_markup=action_keyboard(update.effective_user.id, context.user_data))
+    return ConversationHandler.END
+
+async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Отменил. /profile — начать заново.")
+    return ConversationHandler.END
 
 # Админ меню подписок
 def human_dt(ts: int | float | None) -> str:
@@ -857,6 +922,22 @@ async def on_ping(update:Update,_): await update.message.reply_text("pong")
 
 def main():
     app=Application.builder().token(BOT_TOKEN).build()
+    profile_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("profile", profile_start_cmd),
+            CallbackQueryHandler(profile_start_cb, pattern=r"^profile$")
+        ],
+        states={
+            P_AGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_age)],
+            P_SKIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_skin)],
+            P_HAIR: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_hair)],
+            P_GOALS: [MessageHandler(filters.TEXT & ~filters.COMMAND, profile_goals)],
+        },
+        fallbacks=[CommandHandler("cancel", profile_cancel)],
+        name="profile_conv",
+        persistent=False,
+    )
+    app.add_handler(profile_conv)
     app.add_handler(CommandHandler("start", on_start))
     app.add_handler(CommandHandler("ping", on_ping))
 
