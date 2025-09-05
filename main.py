@@ -434,6 +434,20 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
         rows.append([InlineKeyboardButton("🛠 Администратор", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
+# ---------- Форматирование дат ----------
+def human_dt(ts: int | float | None) -> str:
+    """
+    Безопасно форматирует UNIX timestamp в вид 'dd.mm.YYYY HH:MM'.
+    Если ts пустой/битый — вернёт '—'.
+    """
+    if not ts:
+        return "—"
+    try:
+        return datetime.fromtimestamp(int(ts)).strftime("%d.%m.%Y %H:%M")
+    except Exception:
+        return "—"
+
+
 # ---------- Админ-меню (клавиатуры) ----------
 def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
