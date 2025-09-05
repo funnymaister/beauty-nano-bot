@@ -596,7 +596,7 @@ def ensure_user(user_id:int):
 # ---------- Кнопки главные ----------
 def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKeyboardMarkup:
     premium = has_premium(for_user_id)
-    rows = [
+    rows: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton("🔄 Новый анализ", callback_data="home")],
         [InlineKeyboardButton("⚙️ Режим", callback_data="mode_menu"),
          InlineKeyboardButton("🧑‍💼 Профиль", callback_data="profile")],
@@ -605,13 +605,31 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
          InlineKeyboardButton("👎 Не очень", callback_data="fb:down")],
         [InlineKeyboardButton("ℹ️ Лимиты", callback_data="limits")],
     ]
-    if not premium:
-        rows.append([InlineKeyboardButton("🌟 Премиум", callback_data="premium")])
-    else:
+    if premium:
         rows.append([InlineKeyboardButton("💳 Мои платежи", callback_data="payments_me")])
+    else:
+        rows.append([InlineKeyboardButton("🌟 Премиум", callback_data="premium")])
     if for_user_id in ADMINS:
         rows.append([InlineKeyboardButton("🛠 Администратор", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
+
+
+def premium_menu_kb() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    # YooKassa показываем только если настроена
+    if os.getenv("YK_SHOP_ID") and os.getenv("YK_SECRET_KEY"):
+        rows.append([InlineKeyboardButton("💳 YooKassa (RUB)", callback_data="pay:yookassa")])
+    # Stars — всегда
+    rows.append([InlineKeyboardButton("⭐️ Telegram Stars", callback_data="pay:stars")])
+    # Триал и промокод
+    rows.append([
+        InlineKeyboardButton("🎁 Триал 24ч", callback_data="trial"),
+        InlineKeyboardButton("🎟️ Промокод", callback_data="promo")
+    ])
+    # Назад
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
 
 # ---------- Админ-меню (клавиатуры) ----------
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -744,14 +762,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await profile_start_cb(update, context)
 
     # премиум/лимиты
-    if data=="premium":
-        await q.answer()
-        price=int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
-        txt=(f"🌟 <b>Премиум</b>\n"
-             f"• Безлимит анализов на 30 дней\n"
-             f"• Цена: {price} ₽  /  ⭐️ {STARS_PRICE_XTR}\n"
-             f"Выбери способ оплаты/активации:")
-        return await q.message.reply_text(txt, parse_mode="HTML")
+    if data == "premium":
+        price = int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
+        txt = (
+            "🌟 <b>Премиум</b>\n"
+            "• Безлимит анализов на 30 дней\n"
+            f"• Цена: {price} ₽  /  ⭐️ {STARS_PRICE_XTR}\n"
+            "Выбери способ оплаты/активации:"
+        )
+        return await q.message.reply_text(txt, parse_mode="HTML", reply_markup=premium_menu_kb())
 
     if data=="limits":
         await q.answer()
