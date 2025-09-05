@@ -1,3 +1,4 @@
+# === main.py (Beauty Nano Bot) — правки админ-меню полностью рабочие ===
 import os, io, re, time, json, base64, asyncio, logging, uuid
 from datetime import datetime
 from threading import Thread
@@ -436,10 +437,6 @@ def action_keyboard(for_user_id: int, user_data: dict | None = None) -> InlineKe
 
 # ---------- Форматирование дат ----------
 def human_dt(ts: int | float | None) -> str:
-    """
-    Безопасно форматирует UNIX timestamp в вид 'dd.mm.YYYY HH:MM'.
-    Если ts пустой/битый — вернёт '—'.
-    """
     if not ts:
         return "—"
     try:
@@ -547,7 +544,53 @@ def admin_user_card_kb(target_id: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("🏠 В админ-меню", callback_data="admin")])
     return InlineKeyboardMarkup(rows)
 
+# ---------- Админ: Статистика / Настройки / Бонусы ----------
+def admin_stats_text() -> str:
+    total_users = len(USERS)
+    premium_active = sum(1 for u in USAGE.values() if int(u.get("premium_until",0)) > int(time.time()))
+    yk_saved = sum(1 for u in USAGE.values() if u.get("yk_payment_method_id"))
+    stars_saved = sum(1 for u in USAGE.values() if u.get("stars_charge_id"))
+    up = int(FEEDBACK.get("up",0)); down = int(FEEDBACK.get("down",0))
+    # analyses
+    analyses = 0
+    if _sh:
+        try:
+            analyses = len(_sh.worksheet("analyses").get_all_values()) - 1
+            if analyses < 0: analyses = 0
+        except Exception: pass
+    else:
+        analyses = sum(len(v) for v in HISTORY.values())
+    return (
+        "📊 <b>Статистика</b>\n"
+        f"• Пользователей: {total_users}\n"
+        f"• Премиум активных: {premium_active}\n"
+        f"• Сохранённый метод YooKassa: {yk_saved}\n"
+        f"• Stars подписок: {stars_saved}\n"
+        f"• Анализов: {analyses}\n"
+        f"• Отзывы: 👍 {up} / 👎 {down}"
+    )
 
+def admin_settings_kb() -> InlineKeyboardMarkup:
+    L = int(CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT))
+    P = int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"FREE_LIMIT: {L}", callback_data="noop")],
+        [InlineKeyboardButton("−1", callback_data="admin:cfg:limit:-1"),
+         InlineKeyboardButton("+1", callback_data="admin:cfg:limit:+1"),
+         InlineKeyboardButton("+10", callback_data="admin:cfg:limit:+10")],
+        [InlineKeyboardButton(f"PRICE_RUB: {P}", callback_data="noop")],
+        [InlineKeyboardButton("−10", callback_data="admin:cfg:price:-10"),
+         InlineKeyboardButton("+10", callback_data="admin:cfg:price:+10"),
+         InlineKeyboardButton("+100", callback_data="admin:cfg:price:+100")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="admin")]
+    ])
+
+def admin_bonus_kb(uid:int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎁 Себе +7 дней", callback_data=f"admin:bonus_self:7"),
+         InlineKeyboardButton("🎁 Себе +30 дней", callback_data=f"admin:bonus_self:30")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="admin")]
+    ])
 
 
 def premium_menu_kb()->InlineKeyboardMarkup:
@@ -560,60 +603,43 @@ def premium_menu_kb()->InlineKeyboardMarkup:
     ])
 
 # ---------- Профиль (опросник) ----------
-# Состояния диалога
 P_AGE, P_SKIN, P_HAIR, P_GOALS = range(4)
-
-def get_profile(user_data: dict) -> dict:
-    return user_data.setdefault("profile", {})
-
+def get_profile(user_data: dict) -> dict: return user_data.setdefault("profile", {})
 def profile_to_text(pr: dict) -> str:
-    if not pr:
-        return "Профиль пуст."
-    parts = []
+    if not pr: return "Профиль пуст."
+    parts=[]
     if pr.get("age"):  parts.append(f"Возраст: {pr['age']}")
     if pr.get("skin"): parts.append(f"Кожа: {pr['skin']}")
     if pr.get("hair"): parts.append(f"Волосы: {pr['hair']}")
     if pr.get("goals"):parts.append(f"Цели: {pr['goals']}")
     return "\n".join(parts)
 
-# Старт по команде /profile
 async def profile_start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Сколько тебе лет? (5–100)")
     return P_AGE
-
-# Старт по кнопке «Профиль» (callback)
 async def profile_start_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    await q.message.reply_text("Сколько тебе лет? (5–100)")
-    return P_AGE
-
+    q=update.callback_query; await q.answer(); await q.message.reply_text("Сколько тебе лет? (5–100)"); return P_AGE
 async def profile_age(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = (update.message.text or "").strip()
+    t=(update.message.text or "").strip()
     if not t.isdigit() or not (5 <= int(t) <= 100):
         return await update.message.reply_text("Введи возраст числом от 5 до 100.")
-    get_profile(context.user_data)["age"] = int(t)
+    get_profile(context.user_data)["age"]=int(t)
     await update.message.reply_text("Опиши тип/состояние кожи (например: комбинированная, чувствительная):")
     return P_SKIN
-
 async def profile_skin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    get_profile(context.user_data)["skin"] = (update.message.text or "").strip()[:100]
+    get_profile(context.user_data)["skin"]=(update.message.text or "").strip()[:100]
     await update.message.reply_text("Опиши тип/состояние волос (например: тонкие, склонны к жирности):")
     return P_HAIR
-
 async def profile_hair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    get_profile(context.user_data)["hair"] = (update.message.text or "").strip()[:120]
+    get_profile(context.user_data)["hair"]=(update.message.text or "").strip()[:120]
     await update.message.reply_text("Какие цели/предпочтения? (например: меньше блеска, объём, без сульфатов):")
     return P_GOALS
-
 async def profile_goals(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    get_profile(context.user_data)["goals"] = (update.message.text or "").strip()[:160]
-    await update.message.reply_text("Профиль сохранён:\n\n" + profile_to_text(get_profile(context.user_data)))
-    # покажем основное меню
+    get_profile(context.user_data)["goals"]=(update.message.text or "").strip()[:160]
+    await update.message.reply_text("Профиль сохранён:\n\n"+profile_to_text(get_profile(context.user_data)))
     await update.message.reply_text("Готово! Можешь прислать фото для анализа 💄",
                                     reply_markup=action_keyboard(update.effective_user.id, context.user_data))
     return ConversationHandler.END
-
 async def profile_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменил. /profile — начать заново.")
     return ConversationHandler.END
@@ -672,7 +698,6 @@ async def tg_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
     if not sp: return
     uid=update.effective_user.id
     if sp.currency=="XTR":
-        # сохраним charge id для управления автопродлением
         try:
             ch_id=sp.telegram_payment_charge_id
             u=usage_entry(uid)
@@ -680,7 +705,6 @@ async def tg_successful_payment(update: Update, context: ContextTypes.DEFAULT_TY
             u["stars_auto_canceled"]=False
             persist_all()
         except Exception: pass
-        # срок действия (если Bot API вернул)
         exp_ts=getattr(sp,"subscription_expiration_date", None)
         if isinstance(exp_ts,int) and exp_ts>0:
             uu=usage_entry(uid); uu["premium"]=True; uu["premium_until"]=exp_ts; persist_all()
@@ -711,7 +735,7 @@ def apply_promo(user_id:int, code:str)->str:
     return "❌ Промокод не найден."
 
 
-# ========== АНАЛИЗ ФОТО (сокращённо, без изменений логики) ==========
+# ========== АНАЛИЗ ФОТО ==========
 async def run_blocking(func,*a,**kw): return await asyncio.to_thread(func,*a,**kw)
 
 PHOTO_TIPS_PATTERNS=[r"улучш(ить|ения?)\s+(качества|фото|изображения)", r"качество\s+(фото|изображения)",
@@ -754,7 +778,6 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
         text=(getattr(resp,"text","") or "").strip() or "Ответ пустой."
         text=remove_photo_tips(text)
 
-        # стиль
         def style_response(raw_text:str, mode:str)->str:
             txt=_emoji_bullets(raw_text.strip().replace("\r","\n"))
             txt=_themed_headings(txt)
@@ -764,7 +787,6 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
 
         await send_html_long(chat, style_response(text, mode), keyboard=action_keyboard(user_id, user_data))
 
-        # история + Sheets лог
         asyncio.create_task(run_blocking(save_history, user_id, mode, jpeg_bytes, text))
         asyncio.create_task(run_blocking(sheets_log_analysis, user_id, username, mode, text))
         await chat.send_message(get_usage_text(user_id))
@@ -788,13 +810,11 @@ ADMIN_STATE: Dict[int, Dict[str,Any]] = {}
 def payments_me_kb(uid:int)->InlineKeyboardMarkup:
     u=usage_entry(uid)
     rows=[]
-    # Stars control
     if u.get("stars_charge_id"):
         if not u.get("stars_auto_canceled"):
             rows.append([InlineKeyboardButton("⛔️ Отключить авто Stars", callback_data="me:stars_cancel")])
         else:
             rows.append([InlineKeyboardButton("♻️ Включить авто Stars", callback_data="me:stars_enable")])
-    # YooKassa control
     if u.get("yk_payment_method_id"):
         rows.append([InlineKeyboardButton("⛔️ Отключить авто YooKassa", callback_data="me:yk_disable")])
     rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
@@ -808,7 +828,7 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
         await q.answer()
         return await q.message.reply_text("Пришли фото — сделаю анализ 💄", reply_markup=action_keyboard(uid, context.user_data))
 
-    # режим, история (сокр.) — оставь как в своей версии; ниже платежи/админ
+    # премиум/платежи
     if data=="premium":
         await q.answer()
         price=int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
@@ -877,110 +897,13 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(f"⚠️ Не удалось изменить подписку Stars: {e}")
         return await on_callback(Update(update.update_id, callback_query=update.callback_query), context)
 
-    # === ADMIN ROOT ===
-    if data == "admin":
-        if uid not in ADMINS:
-            return await q.answer("Нет прав", show_alert=True)
-        await q.answer()
-        return await q.message.reply_text("🛠 Админ-панель", reply_markup=admin_main_keyboard())
-
-    # === ADMIN SUBROUTES ===
-    if data.startswith("admin:"):
-        if uid not in ADMINS:
-            return await q.answer("Нет прав", show_alert=True)
-        await q.answer()
-        parts = data.split(":")
-        cmd = parts[1] if len(parts) > 1 else ""
-
-        # раздел Подписки
-        if cmd == "subs":
-            return await q.message.reply_text("💳 Управление подписками", reply_markup=admin_subs_list_kb())
-
-        if cmd == "subs_list":
-            return await q.message.reply_text("💳 Активные подписки:", reply_markup=admin_subs_list_kb())
-
-        if cmd == "subs_user" and len(parts) >= 3 and parts[2].isdigit():
-            target = int(parts[2])
-            u2 = usage_entry(target)
-            exp = human_dt(u2.get("premium_until"))
-            txt = (f"👤 Пользователь {target}\n"
-                   f"• Премиум до: {exp}\n"
-                   f"• Stars charge: {u2.get('stars_charge_id','—')}\n"
-                   f"• YK PM: {u2.get('yk_payment_method_id','—')}\n"
-                   f"• Stars авто: {'отключено' if u2.get('stars_auto_canceled') else 'включено'}")
-            return await q.message.reply_text(txt, reply_markup=admin_subs_user_kb(target))
-
-        if cmd == "subs_action" and len(parts) >= 4:
-            action = parts[2]
-            try:
-                target = int(parts[3])
-            except:
-                return await q.message.reply_text("Некорректный user_id.", reply_markup=admin_main_keyboard())
-            u2 = usage_entry(target)
-
-            if action == "add30":
-                till = extend_premium_days(target, 30)
-                return await q.message.reply_text(f"✅ Продлено до {human_dt(till)}", reply_markup=admin_subs_user_kb(target))
-
-            if action == "clear":
-                u2["premium"] = False
-                u2["premium_until"] = 0
-                persist_all()
-                return await q.message.reply_text("✅ Премиум снят.", reply_markup=admin_subs_user_kb(target))
-
-            if action == "yk_disable":
-                ok = disable_yk_autorenew(target)
-                msg = "✅ Автопродление YooKassa отключено." if ok else "ℹ️ Не было сохранённого способа YooKassa."
-                return await q.message.reply_text(msg, reply_markup=admin_subs_user_kb(target))
-
-            if action in ("stars_cancel", "stars_enable"):
-                ch = u2.get("stars_charge_id")
-                if not ch:
-                    return await q.message.reply_text("ℹ️ Нет активной Stars-подписки.", reply_markup=admin_subs_user_kb(target))
-                try:
-                    is_canceled = (action == "stars_cancel")
-                    await context.bot.edit_user_star_subscription(
-                        user_id=target, telegram_payment_charge_id=ch, is_canceled=is_canceled
-                    )
-                    u2["stars_auto_canceled"] = is_canceled
-                    persist_all()
-                    state = "отключено" if is_canceled else "включено"
-                    return await q.message.reply_text(f"✅ Автопродление Stars {state}.", reply_markup=admin_subs_user_kb(target))
-                except AttributeError:
-                    return await q.message.reply_text("⚠️ Нужна python-telegram-bot 21.8+ для управления Stars.")
-                except Exception as e:
-                    return await q.message.reply_text(f"⚠️ Ошибка Stars: {e}", reply_markup=admin_subs_user_kb(target))
-
-        # обновление справочников
-        if cmd == "reload_refs":
-            try:
-                REF.reload_all()
-                return await q.message.reply_text("✅ Справочники обновлены.", reply_markup=admin_main_keyboard())
-            except Exception as e:
-                return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}", reply_markup=admin_main_keyboard())
-
-        # плейсхолдеры других разделов
-        if cmd == "pick_users":
-            return await q.message.reply_text("👥 Раздел 'Пользователи' в разработке.", reply_markup=admin_main_keyboard())
-        if cmd == "stats":
-            return await q.message.reply_text("📊 Раздел 'Статистика' в разработке.", reply_markup=admin_main_keyboard())
-        if cmd == "broadcast":
-            return await q.message.reply_text("📣 Раздел 'Рассылка' в разработке.", reply_markup=admin_main_keyboard())
-        if cmd == "bonus":
-            return await q.message.reply_text("🎁 Раздел 'Бонусы' в разработке.", reply_markup=admin_main_keyboard())
-        if cmd == "settings":
-            return await q.message.reply_text("⚙️ Раздел 'Настройки' в разработке.", reply_markup=admin_main_keyboard())
-
     # --- фидбек ---
     if data == "fb:up":
         FEEDBACK["up"] = FEEDBACK.get("up", 0) + 1
         persist_all()
-        try:
-            sheets_log_feedback(uid, "up")
-        except Exception:
-            pass
+        try: sheets_log_feedback(uid, "up")
+        except Exception: pass
         await q.answer("Спасибо! 💜")
-        # мягко подсветим счётчики
         return await q.message.reply_text(
             f"👍 {FEEDBACK.get('up',0)}  |  👎 {FEEDBACK.get('down',0)}",
             reply_markup=action_keyboard(uid, context.user_data)
@@ -989,20 +912,15 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if data == "fb:down":
         FEEDBACK["down"] = FEEDBACK.get("down", 0) + 1
         persist_all()
-        try:
-            sheets_log_feedback(uid, "down")
-        except Exception:
-            pass
+        try: sheets_log_feedback(uid, "down")
+        except Exception: pass
         await q.answer("Принято 👌")
         return await q.message.reply_text(
             f"👍 {FEEDBACK.get('up',0)}  |  👎 {FEEDBACK.get('down',0)}",
             reply_markup=action_keyboard(uid, context.user_data)
         )
 
-    # Лог на всякий случай — видно, что приходит
-    log.info("callback data=%s", data)
-
-    # --- меню режима ---
+    # режим
     if data == "mode_menu":
         await q.answer()
         cur = get_mode(context.user_data)
@@ -1010,134 +928,26 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             f"Текущий режим: {MODES.get(cur, cur)}\nВыбери:",
             reply_markup=mode_keyboard(cur)
         )
-
-    # --- установка режима ---
     if data.startswith("mode:"):
         await q.answer("Режим обновлён")
-        m = data.split(":", 1)[1]
-        set_mode(context.user_data, m)
+        m = data.split(":", 1)[1]; set_mode(context.user_data, m)
         return await q.message.reply_text(
             f"Режим установлен: {MODES.get(m, m)}\nПришли фото.",
             reply_markup=action_keyboard(uid, context.user_data)
         )
 
-    # ---------- История: списки и показ ----------
-    def _hist_user_dir(uid: int) -> str:
-        p = os.path.join(HISTORY_DIR, str(uid))
-        os.makedirs(p, exist_ok=True)
-        return p
-
-    def _read_file_text(path: str) -> str:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception:
-            return ""
-
-    def sheets_fetch_history(user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
-        # если Sheets не подключены — вернём пусто
-        if not _sh: return []
-        try:
-            ws = _sh.worksheet("analyses")
-            rows = ws.get_all_records(numericise_ignore=["all"])
-            out = []
-            for r in rows:
-                try:
-                    if int(str(r.get("user_id", "-1")).strip()) != int(user_id):
-                        continue
-                    ts_raw = str(r.get("ts", "")).strip()
-                    ts = int(ts_raw) if ts_raw.isdigit() else int(time.time())
-                    mode = (str(r.get("mode", "both")) or "both").strip().lower()
-                    text = (r.get("text") or "").strip()
-                    out.append({"ts": ts, "mode": mode, "img": None, "txt": None, "txt_inline": text})
-                except Exception:
-                    continue
-            out.sort(key=lambda x: x["ts"], reverse=True)
-            return out[:limit]
-        except Exception as e:
-            log.warning("sheets_fetch_history failed: %s", e)
-            return []
-
-    def list_history(uid: int) -> List[Dict[str, Any]]:
-        # локальные записи
-        local = HISTORY.get(str(uid), [])
-        norm = []
-        for e in local:
-            norm.append({
-                "ts": int(e.get("ts", 0)),
-                "mode": e.get("mode", "both"),
-                "img": e.get("img"),
-                "txt": e.get("txt"),
-                "txt_inline": None
-            })
-        # из Sheets
-        norm += sheets_fetch_history(uid, limit=20)
-
-        # дедуп по ts и сортировка
-        uniq = {}
-        for e in norm:
-            if not e.get("ts"): continue
-            uniq[e["ts"]] = e
-        return sorted(uniq.values(), key=lambda x: x["ts"], reverse=True)
-
-    def history_keyboard(uid: int) -> InlineKeyboardMarkup:
-        entries = list_history(uid)
-        rows = []
-        if entries:
-            for e in entries[:10]:
-                dt = datetime.fromtimestamp(int(e["ts"])).strftime("%d.%m %H:%M")
-                mode = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}.get(e.get("mode", "both"), "")
-                rows.append([InlineKeyboardButton(f"📸 {dt} • {mode}", callback_data=f"hist:{e['ts']}")])
-        rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="home")])
-        return InlineKeyboardMarkup(rows)
-
-    async def show_history_entry(uid: int, entry: Dict[str, Any], chat, user_data):
-        dt = datetime.fromtimestamp(int(entry["ts"])).strftime("%d.%m.%Y %H:%M")
-        mode_title = {"face": "Лицо", "hair": "Волосы", "both": "Лицо + Волосы"}.get(entry.get("mode", "both"),
-                                                                                     "Анализ")
-        head = f"<b>💄 История — {mode_title}</b>\n<i>{dt}</i>\n━━━━━━━━━━━━━━━━\n"
-
-        # берём текст
-        text = ""
-        if entry.get("txt_inline"):
-            text = entry["txt_inline"]
-        elif entry.get("txt"):
-            text = _read_file_text(entry["txt"])
-        text = text.strip() or "Текст отсутствует."
-
-        # немного стилизации (если у тебя уже есть функции — они подхватятся)
-        try:
-            styled = _themed_headings(_emoji_bullets(text))
-        except Exception:
-            styled = html_escape(text)
-
-        html = head + styled
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К списку", callback_data="history")],
-                                   [InlineKeyboardButton("🏠 Домой", callback_data="home")]])
-
-        # если есть локальная картинка — пошлём фото с подписью; иначе — просто текст
-        if entry.get("img") and os.path.exists(entry["img"]):
-            try:
-                with open(entry["img"], "rb") as f:
-                    await chat.send_photo(photo=f, caption=f"📸 {dt}", reply_markup=None)
-            except Exception as e:
-                log.warning("send_photo failed: %s", e)
-        await send_html_long(chat, html, keyboard=kb)
-
-    # --- лимиты/цены ---
+    # лимиты
     if data == "limits":
         await q.answer()
         free_limit = int(CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT))
         price_rub  = int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB))
-        txt = (
-            "ℹ️ <b>Лимиты и цена</b>\n"
-            f"• Бесплатно: {free_limit} анализов/день\n"
-            f"• Премиум: безлимит на 30 дней\n"
-            f"• Цена: {price_rub} ₽  /  ⭐️ {STARS_PRICE_XTR}"
-        )
+        txt = ("ℹ️ <b>Лимиты и цена</b>\n"
+               f"• Бесплатно: {free_limit} анализов/день\n"
+               f"• Премиум: безлимит на 30 дней\n"
+               f"• Цена: {price_rub} ₽  /  ⭐️ {STARS_PRICE_XTR}")
         return await q.message.reply_text(txt, parse_mode="HTML")
 
-    # --- История: список ---
+    # история
     if data == "history":
         await q.answer()
         entries = list_history(uid)
@@ -1147,120 +957,88 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="home")]])
             )
         return await q.message.reply_text("Выбери запись из истории:", reply_markup=history_keyboard(uid))
-
-    # --- История: просмотр записи ---
     if data.startswith("hist:"):
         await q.answer()
-        try:
-            ts = int(data.split(":",1)[1])
-        except Exception:
-            return await q.message.reply_text("Некорректная запись истории.", reply_markup=history_keyboard(uid))
-        entries = list_history(uid)
-        entry = next((e for e in entries if int(e["ts"]) == ts), None)
-        if not entry:
-            return await q.message.reply_text("Запись не найдена.", reply_markup=history_keyboard(uid))
-        return await show_history_entry(uid, entry, q.message.chat, context.user_data)
+        try: ts = int(data.split(":",1)[1])
+        except Exception: return await q.message.reply_text("Некорректная запись истории.", reply_markup=history_keyboard(uid))
+        entry = next((e for e in list_history(uid) if int(e["ts"]) == ts), None)
+        if not entry: return await q.message.reply_text("Запись не найдена.", reply_markup=history_keyboard(uid))
+        async def _read_file_text(path:str)->str:
+            try:
+                with open(path,"r",encoding="utf-8") as f: return f.read()
+            except Exception: return ""
+        dt=datetime.fromtimestamp(int(entry["ts"])).strftime("%d.%m.%Y %H:%M")
+        mode_title={"face":"Лицо","hair":"Волосы","both":"Лицо + Волосы"}.get(entry.get("mode","both"),"Анализ")
+        head=f"<b>💄 История — {mode_title}</b>\n<i>{dt}</i>\n━━━━━━━━━━━━━━━━\n"
+        text=entry.get("txt_inline") or (await asyncio.to_thread(_read_file_text, entry.get("txt",""))) or "Текст отсутствует."
+        styled=_themed_headings(_emoji_bullets(text))
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ К списку", callback_data="history")],
+                                 [InlineKeyboardButton("🏠 Домой", callback_data="home")]])
+        if entry.get("img") and os.path.exists(entry["img"]):
+            try:
+                with open(entry["img"], "rb") as f: await q.message.chat.send_photo(photo=f, caption=f"📸 {dt}")
+            except Exception as e: log.warning("send_photo failed: %s", e)
+        await send_html_long(q.message.chat, head+styled, keyboard=kb)
 
-
-    # === ADMIN ===
-    if data=="admin":
+    # === ADMIN ROOT ===
+    if data == "admin":
         if uid not in ADMINS: return await q.answer("Нет прав", show_alert=True)
         await q.answer()
-        return await q.message.reply_text(
-            "🛠 Админ-панель",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👥 Пользователи",callback_data="admin:pick_users"),
-                 InlineKeyboardButton("📊 Статистика",callback_data="admin:stats")],
-                [InlineKeyboardButton("💳 Подписки",callback_data="admin:subs"),
-                 InlineKeyboardButton("📣 Рассылка",callback_data="admin:broadcast")],
-                [InlineKeyboardButton("🎁 Бонусы",callback_data="admin:bonus"),
-                 InlineKeyboardButton("⚙️ Настройки",callback_data="admin:settings")],
-                [InlineKeyboardButton("🔄 Обновить справочники",callback_data="admin:reload_refs")],
-                [InlineKeyboardButton("⬅️ Назад",callback_data="home")]
-            ])
-        )
+        return await q.message.reply_text("🛠 Админ-панель", reply_markup=admin_main_keyboard())
 
+    # === ADMIN SUBROUTES ===
     if data.startswith("admin:"):
         if uid not in ADMINS: return await q.answer("Нет прав", show_alert=True)
-        await q.answer(); parts=data.split(":"); cmd=parts[1]
+        await q.answer()
+        parts = data.split(":"); cmd = parts[1] if len(parts)>1 else ""
 
-        # --- Админ: Пользователи ---
+        # --- Пользователи ---
         if cmd == "pick_users":
-            # стартовая страница 0
-            return await q.message.reply_text(
-                "👥 Пользователи",
-                reply_markup=admin_users_list_kb(page=0)
-            )
-
+            return await q.message.reply_text("👥 Пользователи", reply_markup=admin_users_list_kb(page=0))
         if cmd == "users_page" and len(parts) >= 3:
-            try:
-                page = int(parts[2])
-            except Exception:
-                page = 0
-            return await q.message.reply_text(
-                "👥 Пользователи",
-                reply_markup=admin_users_list_kb(page=page)
-            )
-
+            try: page = int(parts[2])
+            except Exception: page = 0
+            return await q.message.reply_text("👥 Пользователи", reply_markup=admin_users_list_kb(page=page))
         if cmd == "user" and len(parts) >= 3 and parts[2].isdigit():
-            target = int(parts[2])
-            u = usage_entry(target)
-            exp = human_dt(u.get("premium_until"))
+            target = int(parts[2]); u = usage_entry(target)
             txt = (f"👤 Пользователь {target}\n"
-                   f"• Премиум до: {exp}\n"
-                   f"• Бесплатных использовано: {u.get('count', 0)} / {CONFIG.get('FREE_LIMIT', DEFAULT_FREE_LIMIT)}\n"
+                   f"• Премиум до: {human_dt(u.get('premium_until'))}\n"
+                   f"• Бесплатных использовано: {u.get('count',0)} / {CONFIG.get('FREE_LIMIT', DEFAULT_FREE_LIMIT)}\n"
                    f"• Админ: {'да' if target in ADMINS else 'нет'}")
             return await q.message.reply_text(txt, reply_markup=admin_user_card_kb(target))
-
         if cmd == "user_action" and len(parts) >= 4:
             action = parts[2]
-            try:
-                target = int(parts[3])
-            except Exception:
-                return await q.message.reply_text("Некорректный user_id.", reply_markup=admin_main_keyboard())
+            try: target = int(parts[3])
+            except Exception: return await q.message.reply_text("Некорректный user_id.", reply_markup=admin_main_keyboard())
             u = usage_entry(target)
-
             if action == "add30":
                 till = extend_premium_days(target, 30)
-                return await q.message.reply_text(f"✅ Продлено до {human_dt(till)}",
-                                                  reply_markup=admin_user_card_kb(target))
-
+                return await q.message.reply_text(f"✅ Продлено до {human_dt(till)}", reply_markup=admin_user_card_kb(target))
             if action == "clear":
-                u["premium"] = False
-                u["premium_until"] = 0
-                persist_all()
+                u["premium"] = False; u["premium_until"] = 0; persist_all()
                 return await q.message.reply_text("✅ Премиум снят.", reply_markup=admin_user_card_kb(target))
-
             if action == "resetfree":
-                u["count"] = 0
-                persist_all()
-                return await q.message.reply_text("✅ Бесплатные попытки сброшены.",
-                                                  reply_markup=admin_user_card_kb(target))
-
+                u["count"] = 0; persist_all()
+                return await q.message.reply_text("✅ Бесплатные попытки сброшены.", reply_markup=admin_user_card_kb(target))
             if action == "admin":
-                ADMINS.add(target);
-                persist_all()
-                return await q.message.reply_text("✅ Пользователь назначен админом.",
-                                                  reply_markup=admin_user_card_kb(target))
-
+                ADMINS.add(target); persist_all()
+                return await q.message.reply_text("✅ Пользователь назначен админом.", reply_markup=admin_user_card_kb(target))
             if action == "unadmin":
-                if target in ADMINS: ADMINS.remove(target)
-                persist_all()
+                if target in ADMINS: ADMINS.remove(target); persist_all()
                 return await q.message.reply_text("✅ Права админа сняты.", reply_markup=admin_user_card_kb(target))
 
-        if cmd=="subs":      return await q.message.reply_text("💳 Управление подписками", reply_markup=admin_subs_list_kb())
-        if cmd=="subs_list": return await q.message.reply_text("💳 Активные подписки:", reply_markup=admin_subs_list_kb())
-
-        if cmd=="subs_user" and len(parts)>=3 and parts[2].isdigit():
-            target=int(parts[2]); u=usage_entry(target); exp=human_dt(u.get("premium_until"))
+        # --- Подписки ---
+        if cmd == "subs":      return await q.message.reply_text("💳 Управление подписками", reply_markup=admin_subs_list_kb())
+        if cmd == "subs_list": return await q.message.reply_text("💳 Активные подписки:",   reply_markup=admin_subs_list_kb())
+        if cmd == "subs_user" and len(parts) >= 3 and parts[2].isdigit():
+            target=int(parts[2]); u=usage_entry(target)
             txt=(f"👤 Пользователь {target}\n"
-                 f"• Премиум до: {exp}\n"
+                 f"• Премиум до: {human_dt(u.get('premium_until'))}\n"
                  f"• Stars charge: {u.get('stars_charge_id','—')}\n"
                  f"• YK PM: {u.get('yk_payment_method_id','—')}\n"
                  f"• Stars авто: {'отключено' if u.get('stars_auto_canceled') else 'включено'}")
             return await q.message.reply_text(txt, reply_markup=admin_subs_user_kb(target))
-
-        if cmd=="subs_action" and len(parts)>=4:
+        if cmd == "subs_action" and len(parts) >= 4:
             action=parts[2]; target=int(parts[3]); u=usage_entry(target)
             if action=="add30":
                 till=extend_premium_days(target,30)
@@ -1287,11 +1065,50 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     return await q.message.reply_text(f"⚠️ Не удалось изменить Stars: {e}", reply_markup=admin_subs_user_kb(target))
 
-        if cmd=="reload_refs":
-            try: REF.reload_all(); return await q.message.reply_text("✅ Справочники обновлены из Sheets")
-            except Exception as e: return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}")
+        # --- Статистика ---
+        if cmd == "stats":
+            return await q.message.reply_text(admin_stats_text(), parse_mode="HTML", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin")]]))
 
-        # (прочие ветки админки: users/stats/bonus/settings — оставь как в своей версии)
+        # --- Рассылка ---
+        if cmd == "broadcast":
+            ADMIN_STATE[uid] = {"await": "broadcast"}
+            return await q.message.reply_text("📣 Пришли текст рассылки одним сообщением.\nОтправлю всем пользователям. /cancel — отмена.")
+
+        # --- Бонусы ---
+        if cmd == "bonus":
+            return await q.message.reply_text("🎁 Быстрые бонусы", reply_markup=admin_bonus_kb(uid))
+
+        if cmd == "bonus_self" and len(parts) >= 3 and parts[2].isdigit():
+            days = int(parts[2])
+            till = extend_premium_days(uid, days)
+            return await q.message.reply_text(f"✅ Выдано себе +{days} дн. Премиума (до {human_dt(till)}).", reply_markup=admin_main_keyboard())
+
+        # --- Настройки ---
+        if cmd == "settings":
+            return await q.message.reply_text("⚙️ Настройки", reply_markup=admin_settings_kb())
+
+        if cmd == "cfg" and len(parts) >= 4:
+            what = parts[2]; delta_raw = parts[3]
+            try:
+                delta = int(delta_raw)
+            except:
+                delta = 0
+            if what == "limit":
+                CONFIG["FREE_LIMIT"] = max(0, int(CONFIG.get("FREE_LIMIT", DEFAULT_FREE_LIMIT)) + delta)
+            if what == "price":
+                CONFIG["PRICE_RUB"] = max(0, int(CONFIG.get("PRICE_RUB", DEFAULT_PRICE_RUB)) + delta)
+            persist_all()
+            return await q.message.reply_text("⚙️ Настройки обновлены", reply_markup=admin_settings_kb())
+
+        # --- Обновить справочники ---
+        if cmd == "reload_refs":
+            try:
+                REF.reload_all()
+                return await q.message.reply_text("✅ Справочники обновлены.", reply_markup=admin_main_keyboard())
+            except Exception as e:
+                return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}", reply_markup=admin_main_keyboard())
+
+    log.info("callback data=%s", data)
 
 
 async def on_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -1302,7 +1119,25 @@ async def on_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
         USER_STATE.pop(uid,None)
         msg=apply_promo(uid, code)
         return await update.message.reply_text(msg, reply_markup=action_keyboard(uid, context.user_data))
-    # здесь можно оставить админские текстовые сценарии из твоей версии
+
+    # админская рассылка
+    ast = ADMIN_STATE.get(uid)
+    if uid in ADMINS and ast and ast.get("await") == "broadcast":
+        ADMIN_STATE.pop(uid, None)
+        text = (update.message.text or "").strip()
+        sent = 0; fail = 0
+        for to_id in list(USERS):
+            try:
+                await context.bot.send_message(to_id, text)
+                sent += 1
+                await asyncio.sleep(0.03)  # бережно
+            except Forbidden:
+                fail += 1
+            except Exception:
+                fail += 1
+        return await update.message.reply_text(f"📣 Готово: отправлено {sent}, ошибок {fail}.", reply_markup=admin_main_keyboard())
+
+    # здесь можно оставить другие админ-тексты…
 
 
 # ========== HEALTHZ / WEBHOOKS ==========
@@ -1347,7 +1182,6 @@ async def autorenew_loop():
             for uid,u in list(USAGE.items()):
                 pm=u.get("yk_payment_method_id")
                 until=int(u.get("premium_until",0))
-                # за 6 часов до истечения пробуем продлить
                 if pm and until and until-now<6*3600:
                     ok=yk_charge_saved(uid, price, pm)
                     log.info("AutoRenew try uid=%s ok=%s", uid, ok)
@@ -1400,7 +1234,7 @@ def main():
     # Кнопки
     app.add_handler(CallbackQueryHandler(on_callback))
 
-    # Текст (промокод)
+    # Текст (промокод/рассылка)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     start_flask_endpoints(PORT)
@@ -1408,7 +1242,6 @@ def main():
     try: REF.reload_all()
     except Exception as e: log.warning("RefData init failed: %s", e)
 
-    # авто-продление YK в фоне
     asyncio.get_event_loop().create_task(autorenew_loop())
 
     app.run_polling()
