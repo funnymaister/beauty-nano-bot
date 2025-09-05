@@ -494,6 +494,59 @@ def admin_subs_user_kb(target_id: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:subs_list")])
     return InlineKeyboardMarkup(rows)
 
+# ---------- Админ: Пользователи (клавиатуры) ----------
+def _user_short_row(u_id: int) -> str:
+    u = USAGE.get(u_id, {})
+    prem = int(u.get("premium_until", 0)) > int(time.time())
+    adm  = (u_id in ADMINS)
+    badges = []
+    if prem: badges.append("🌟")
+    if adm:  badges.append("⭐")
+    tag = " ".join(badges)
+    exp = human_dt(u.get("premium_until"))
+    return f"{u_id} • до {exp} {tag}".strip()
+
+def admin_users_list_kb(page: int = 0, per_page: int = 10) -> InlineKeyboardMarkup:
+    ids = sorted(list(USERS))
+    total = len(ids)
+    start = max(0, page * per_page)
+    end   = min(total, start + per_page)
+    page_ids = ids[start:end]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if not page_ids:
+        rows.append([InlineKeyboardButton("Пока пусто", callback_data="noop")])
+    else:
+        for uid in page_ids:
+            rows.append([InlineKeyboardButton(_user_short_row(uid), callback_data=f"admin:user:{uid}")])
+
+    nav = []
+    if start > 0:
+        nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:users_page:{page-1}"))
+    if end < total:
+        nav.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"admin:users_page:{page+1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton("🏠 В админ-меню", callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
+
+def admin_user_card_kb(target_id: int) -> InlineKeyboardMarkup:
+    u = usage_entry(target_id)
+    is_admin = (target_id in ADMINS)
+    rows = [
+        [InlineKeyboardButton("➕ Продлить +30 дн.", callback_data=f"admin:user_action:add30:{target_id}")],
+        [InlineKeyboardButton("❌ Снять премиум",    callback_data=f"admin:user_action:clear:{target_id}")],
+        [InlineKeyboardButton("🔄 Сбросить бесплатные", callback_data=f"admin:user_action:resetfree:{target_id}")]
+    ]
+    if is_admin:
+        rows.append([InlineKeyboardButton("⭐ Убрать админа", callback_data=f"admin:user_action:unadmin:{target_id}")])
+    else:
+        rows.append([InlineKeyboardButton("⭐ Назначить админом", callback_data=f"admin:user_action:admin:{target_id}")])
+    rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:pick_users")])
+    rows.append([InlineKeyboardButton("🏠 В админ-меню", callback_data="admin")])
+    return InlineKeyboardMarkup(rows)
+
 
 
 
@@ -1162,60 +1215,6 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text("Запись не найдена.", reply_markup=history_keyboard(uid))
         return await show_history_entry(uid, entry, q.message.chat, context.user_data)
 
-    # ---------- Админ: Пользователи (клавиатуры) ----------
-    def _user_short_row(u_id: int) -> str:
-        u = USAGE.get(u_id, {})
-        prem = int(u.get("premium_until", 0)) > int(time.time())
-        adm = (u_id in ADMINS)
-        badges = []
-        if prem: badges.append("🌟")
-        if adm:  badges.append("⭐")
-        tag = " ".join(badges)
-        exp = human_dt(u.get("premium_until"))
-        return f"{u_id} • до {exp} {tag}".strip()
-
-    def admin_users_list_kb(page: int = 0, per_page: int = 10) -> InlineKeyboardMarkup:
-        ids = sorted(list(USERS))
-        total = len(ids)
-        start = max(0, page * per_page)
-        end = min(total, start + per_page)
-        page_ids = ids[start:end]
-
-        rows: list[list[InlineKeyboardButton]] = []
-        if not page_ids:
-            rows.append([InlineKeyboardButton("Пока пусто", callback_data="noop")])
-        else:
-            for uid in page_ids:
-                rows.append([InlineKeyboardButton(_user_short_row(uid), callback_data=f"admin:user:{uid}")])
-
-        nav = []
-        if start > 0:
-            nav.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"admin:users_page:{page - 1}"))
-        if end < total:
-            nav.append(InlineKeyboardButton("Вперёд ➡️", callback_data=f"admin:users_page:{page + 1}"))
-        if nav:
-            rows.append(nav)
-
-        rows.append([InlineKeyboardButton("🏠 В админ-меню", callback_data="admin")])
-        return InlineKeyboardMarkup(rows)
-
-    def admin_user_card_kb(target_id: int) -> InlineKeyboardMarkup:
-        u = usage_entry(target_id)
-        is_admin = (target_id in ADMINS)
-        rows = [
-            [InlineKeyboardButton("➕ Продлить +30 дн.", callback_data=f"admin:user_action:add30:{target_id}")],
-            [InlineKeyboardButton("❌ Снять премиум", callback_data=f"admin:user_action:clear:{target_id}")],
-            [InlineKeyboardButton("🔄 Сбросить бесплатные", callback_data=f"admin:user_action:resetfree:{target_id}")]
-        ]
-        if is_admin:
-            rows.append(
-                [InlineKeyboardButton("⭐ Убрать админа", callback_data=f"admin:user_action:unadmin:{target_id}")])
-        else:
-            rows.append(
-                [InlineKeyboardButton("⭐ Назначить админом", callback_data=f"admin:user_action:admin:{target_id}")])
-        rows.append([InlineKeyboardButton("⬅️ К списку", callback_data="admin:pick_users")])
-        rows.append([InlineKeyboardButton("🏠 В админ-меню", callback_data="admin")])
-        return InlineKeyboardMarkup(rows)
 
     # === ADMIN ===
     if data=="admin":
@@ -1283,6 +1282,7 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             except Exception as e: return await q.message.reply_text(f"⚠️ Не удалось обновить: {e}")
 
         # (прочие ветки админки: users/stats/bonus/settings — оставь как в своей версии)
+
 
 async def on_text(update:Update, context:ContextTypes.DEFAULT_TYPE):
     uid=update.effective_user.id
