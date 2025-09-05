@@ -778,6 +778,35 @@ async def on_callback(update:Update, context:ContextTypes.DEFAULT_TYPE):
             return await q.message.reply_text(f"⚠️ Не удалось изменить подписку Stars: {e}")
         return await on_callback(Update(update.update_id, callback_query=update.callback_query), context)
 
+    # --- фидбек ---
+    if data == "fb:up":
+        FEEDBACK["up"] = FEEDBACK.get("up", 0) + 1
+        persist_all()
+        try:
+            sheets_log_feedback(uid, "up")
+        except Exception:
+            pass
+        await q.answer("Спасибо! 💜")
+        # мягко подсветим счётчики
+        return await q.message.reply_text(
+            f"👍 {FEEDBACK.get('up',0)}  |  👎 {FEEDBACK.get('down',0)}",
+            reply_markup=action_keyboard(uid, context.user_data)
+        )
+
+    if data == "fb:down":
+        FEEDBACK["down"] = FEEDBACK.get("down", 0) + 1
+        persist_all()
+        try:
+            sheets_log_feedback(uid, "down")
+        except Exception:
+            pass
+        await q.answer("Принято 👌")
+        return await q.message.reply_text(
+            f"👍 {FEEDBACK.get('up',0)}  |  👎 {FEEDBACK.get('down',0)}",
+            reply_markup=action_keyboard(uid, context.user_data)
+        )
+
+
     # === ADMIN ===
     if data=="admin":
         if uid not in ADMINS: return await q.answer("Нет прав", show_alert=True)
