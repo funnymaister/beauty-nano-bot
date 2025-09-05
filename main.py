@@ -606,6 +606,68 @@ def premium_menu_kb()->InlineKeyboardMarkup:
 P_AGE, P_SKIN, P_HAIR, P_GOALS = range(4)
 def get_profile(user_data: dict) -> dict: return user_data.setdefault("profile", {})
 def profile_to_text(pr: dict) -> str:
+    # ---------- Персонализация по профилю ----------
+    def _profile_context(user_data: dict) -> tuple[str, str]:
+        """
+        Возвращает:
+        - human: компактная строка для бейджа (видит пользователь)
+        - rules: технические правила для промпта (видит только модель)
+        """
+        pr = get_profile(user_data)
+        # human string
+        parts = []
+        if pr.get("age"):  parts.append(f"Возраст: {pr['age']}")
+        if pr.get("skin"): parts.append(f"Кожа: {pr['skin']}")
+        if pr.get("hair"): parts.append(f"Волосы: {pr['hair']}")
+        if pr.get("goals"): parts.append(f"Цели: {pr['goals']}")
+        human = "; ".join(parts)
+
+        # rules for model
+        rules = []
+        age = pr.get("age")
+        skin = (pr.get("skin") or "").lower()
+        hair = (pr.get("hair") or "").lower()
+        goals = (pr.get("goals") or "").lower()
+
+        # Возраст
+        try:
+            if age and int(age) < 18:
+                rules.append("Избегай ретиноидов высокой концентрации и кислотных пилингов >5%; только мягкий уход.")
+        except Exception:
+            pass
+
+        # Кожа
+        if "чувств" in skin or "реактив" in skin:
+            rules.append(
+                "Кожа чувствительная: без отдушек и спиртов; избегай сильных кислот; упор на пантенол/церамиды/алоэ.")
+        if "жир" in skin or "акне" in skin or "проблем" in skin:
+            rules.append(
+                "Кожа жирная/склонная к акне: лёгкие некомедогенные текстуры, BHA 1–2% при необходимости, SPF без масел.")
+        if "сух" in skin or "атоп" in skin:
+            rules.append("Кожа сухая: мягкое очищение, увлажнение + липидное восстановление, окклюзивы вечером.")
+        if "пигмент" in skin or "пятн" in skin:
+            rules.append(
+                "Есть пигментация: дневной SPF обязателен, мягкие осветляющие компоненты (ниацинамид, арбутин).")
+
+        # Волосы
+        if "кудр" in hair or "волнист" in hair:
+            rules.append(
+                "Кудрявые/волнистые волосы: без сульфатов и жёстких силиконов; кондиционирование и диффузор на низком нагреве.")
+        if "крашен" in hair or "осветл" in hair or "поврежд" in hair:
+            rules.append("Окрашенные/осветлённые: бережные шампуни, маски с протеинами/липидами, термозащита.")
+
+        # Цели
+        if goals:
+            rules.append(f"Приоритизируй цели пользователя: {goals}.")
+
+        base = (
+            "Учитывай персональные правила ниже. Если правило конфликтует с общим советом — выбери более мягкий и безопасный вариант. "
+            "Дай практичные списки для ☀️ утро / 🌤️ день / 🌙 вечер с краткими пунктами. Не обсуждай качество фото."
+        )
+        rules_text = ("Правила персонализации:\n- " + "\n- ".join(rules)) if rules else \
+            "Правила персонализации: нет явных ограничений; подбирай базовый мягкий уход."
+        return human, base + "\n" + rules_text
+
     if not pr: return "Профиль пуст."
     parts=[]
     if pr.get("age"):  parts.append(f"Возраст: {pr['age']}")
@@ -753,8 +815,21 @@ def get_mode(user_data:dict)->str: return user_data.get("mode","both")
 def set_mode(user_data:dict, m:str):
     if m in MODES: user_data["mode"]=m
 
-async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, user_id:int, username:str|None):
+async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, user_id:int, username:str|None,
+                               _profile_context=None):
     if not check_usage(user_id):
+        # Подсказка заполнить профиль (один раз)
+        pr = get_profile(user_data)
+        if not any(pr.get(k) for k in ("age", "skin", "hair", "goals")):
+            try:
+                await chat.send_message(
+                    "Хочешь более точные рекомендации? Заполни короткий профиль 🧑‍💼",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🧑‍💼 Заполнить профиль", callback_data="profile")]])
+                )
+            except Exception:
+                pass
+
         return await chat.send_message("🚫 Лимит исчерпан. Оформи 🌟 Премиум.", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🌟 Купить Премиум",callback_data="premium")],
             [InlineKeyboardButton("ℹ️ Лимиты",callback_data="limits")]
@@ -768,22 +843,33 @@ async def _process_image_bytes(chat, img_bytes:bytes, mode:str, user_data:dict, 
         log.exception("PIL convert"); return await chat.send_message("Не удалось обработать фото. Попробуй другое.")
 
     b64=base64.b64encode(jpeg_bytes).decode("utf-8")
-    payload=[
-        ("Ты бьюти-ассистент. Проанализируй фото в контексте режима: "
-         f"{mode}. Дай практичные рекомендации (утро/день/вечер). Никаких советов про качество фото/ракурс."),
-        {"inline_data":{"mime_type":"image/jpeg","data":b64}}
+    # профиль -> персональные правила
+    human_profile, rule_block = _profile_context(user_data)
+
+    system_prompt = (
+        "Ты бьюти-ассистент. Проанализируй фото в контексте режима: "
+        f"{mode}. Учитывай анкету пользователя и правила ниже.\n\n"
+        f"{rule_block}"
+    )
+
+    payload = [
+        system_prompt,
+        {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
     ]
+
     try:
         resp=await run_blocking(model.generate_content, payload)
         text=(getattr(resp,"text","") or "").strip() or "Ответ пустой."
         text=remove_photo_tips(text)
 
-        def style_response(raw_text:str, mode:str)->str:
-            txt=_emoji_bullets(raw_text.strip().replace("\r","\n"))
-            txt=_themed_headings(txt)
-            head=f"<b>💄 Beauty Nano — {MODES.get(mode,'Анализ')}</b>\n━━━━━━━━━━━━━━━━\n"
-            tail="\n<i>Готово! Пришли новое фото или измени режим ниже.</i>"
-            return head+txt+tail
+        def style_response(raw_text: str, mode: str) -> str:
+            txt = _emoji_bullets(raw_text.strip().replace("\r", "\n"))
+            txt = _themed_headings(txt)
+            head = f"<b>💄 Beauty Nano — {MODES.get(mode, 'Анализ')}</b>\n"
+            badge = f"<i>ℹ️ Профиль: {html_escape(human_profile)}</i>\n" if human_profile else ""
+            sep = "━━━━━━━━━━━━━━━━\n"
+            tail = "\n<i>Готово! Пришли новое фото или измени режим ниже.</i>"
+            return head + badge + sep + txt + tail
 
         await send_html_long(chat, style_response(text, mode), keyboard=action_keyboard(user_id, user_data))
 
